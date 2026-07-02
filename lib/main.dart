@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 import 'constants/app_constants.dart';
-import 'models/user_settings.dart';
 import 'models/app_enums.dart';
 import 'providers/user_settings_provider.dart';
 import 'providers/connectivity_provider.dart';
@@ -88,7 +87,22 @@ class BeaconAIResumeApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final settings = ref.watch(userSettingsProvider);
+    // Scoped to exactly the fields this widget uses — userSettingsProvider's
+    // updateShouldNotify is unconditionally true (UserSettings is a mutable
+    // HiveObject mutated in place via cascades, so by the time Riverpod
+    // could compare previous/next they're already the same mutated object;
+    // there's no way to tell what changed at that point). select()'s own
+    // downstream equality check on this record is what actually prevents an
+    // unrelated settings change (e.g. markRatingPromptShown) from rebuilding
+    // the whole app shell.
+    final settings = ref.watch(userSettingsProvider.select((s) => (
+          theme: s.theme,
+          fontScaleOverride: s.fontScaleOverride,
+          reduceMotionOverride: s.reduceMotionOverride,
+          highContrastOverride: s.highContrastOverride,
+          privacyAccepted: s.privacyAccepted,
+          onboardingComplete: s.onboardingComplete,
+        )));
 
     // Resolve theme mode from UserSettings preference.
     final themeMode = switch (settings.theme) {
@@ -148,7 +162,10 @@ class BeaconAIResumeApp extends ConsumerWidget {
       //   1. Privacy not accepted → PrivacyPolicyScreen (hard gate)
       //   2. Privacy accepted, onboarding incomplete → OnboardingScreen
       //   3. Fully onboarded → DashboardScreen
-      initialRoute: _resolveInitialRoute(settings),
+      initialRoute: _resolveInitialRoute(
+        privacyAccepted: settings.privacyAccepted,
+        onboardingComplete: settings.onboardingComplete,
+      ),
 
       // ── Route Map ─────────────────────────────────────────────────────────
       routes: {
@@ -213,11 +230,14 @@ class BeaconAIResumeApp extends ConsumerWidget {
   }
 
   /// Resolves the first route to show based on UserSettings state.
-  static String _resolveInitialRoute(UserSettings settings) {
-    if (!settings.privacyAccepted) {
+  static String _resolveInitialRoute({
+    required bool privacyAccepted,
+    required bool onboardingComplete,
+  }) {
+    if (!privacyAccepted) {
       return AppConstants.routePrivacyPolicy;
     }
-    if (!settings.onboardingComplete) {
+    if (!onboardingComplete) {
       return AppConstants.routeOnboarding;
     }
     return AppConstants.routeDashboard;

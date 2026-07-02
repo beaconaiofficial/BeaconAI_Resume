@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 import '../constants/app_constants.dart';
 import '../models/supporting_models.dart';
+import 'dev_extraction_cache.dart';
 import 'resume_sanitizer.dart';
 
 const _uuid = Uuid();
@@ -28,6 +29,14 @@ const _uuid = Uuid();
 // military ones. The model reads actual bullet/course content, not
 // institution names. Kept at file level so it is shared across text, PDF,
 // and image paths.
+//
+// Prompt caching was evaluated for this constant + _kMilitaryDocumentParsingRules
+// (extractResumeFields' full rendered system prompt) and skipped: measured
+// via a live max_tokens:0 call at 3,330 input tokens, below Haiku 4.5's
+// 4,096-token minimum cacheable prefix — cache_control would be a silent
+// no-op as-is. Not padded artificially to clear the threshold; revisit only
+// if this content grows for genuine quality reasons, or Anthropic lowers
+// the minimum.
 const _kEntryClassificationRules = r'''
 
 ENTRY CLASSIFICATION RULES (apply to every document, for every entry):
@@ -86,6 +95,9 @@ Every education entry must be tagged with "entryType":
   certificate program (a bootcamp, trade school course, professional
   training program, or similar) rather than a degree — regardless of the
   institution's name. Judge this from what the entry actually describes.
+- "uncertain": you cannot confidently tell which of the above applies. Set
+  "uncertaintyReason" to a short, plain-language sentence explaining why.
+  Do not guess — mark it uncertain instead.
 
 If the document is a college or university transcript, extract and map to
 ONE education entry (entryType: "degree"): student name, institution,
@@ -259,6 +271,51 @@ class CloudflareWorkerService {
   // 90 s gives headroom without hanging the UI indefinitely.
   static const Duration _generationTimeout = Duration(seconds: 90);
 
+  // ── Cost/usage logging ──────────────────────────────────────────────────
+  //
+  // Per-call visibility into token usage and estimated cost — reads fields
+  // already present in every Claude API response, so this adds no extra
+  // request and no production cost. Update this table if pricing changes;
+  // it's a rough estimate for debugging, not a billing source of truth.
+  static const Map<String, ({double inputPerMTok, double outputPerMTok})>
+      _pricingPerMTok = {
+    'claude-haiku-4-5-20251001': (inputPerMTok: 1.0, outputPerMTok: 5.0),
+    'claude-sonnet-4-6': (inputPerMTok: 3.0, outputPerMTok: 15.0),
+  };
+
+  /// Logs token usage and an estimated cost for one API call. [callLabel]
+  /// identifies which call site this was (e.g. "extractResumeFields",
+  /// "tailoredResume.draftGeneration") so a test session's logs can answer
+  /// "which call cost what" without guessing. No-ops silently if the
+  /// response has no usage block (e.g. an error response).
+  static void _logUsage(
+      String callLabel, String model, Map<String, dynamic> responseBody) {
+    final usage = responseBody['usage'] as Map<String, dynamic>?;
+    if (usage == null) return;
+
+    final inputTokens = usage['input_tokens'] as int? ?? 0;
+    final outputTokens = usage['output_tokens'] as int? ?? 0;
+    final cacheCreationTokens = usage['cache_creation_input_tokens'] as int? ?? 0;
+    final cacheReadTokens = usage['cache_read_input_tokens'] as int? ?? 0;
+
+    final pricing = _pricingPerMTok[model];
+    var costLabel = 'unknown pricing for $model';
+    if (pricing != null) {
+      // Cache writes bill at ~1.25x the input rate (5-minute TTL, the only
+      // TTL this app uses); cache reads at ~0.1x. See shared/prompt-caching.md.
+      final cost = (inputTokens / 1e6 * pricing.inputPerMTok) +
+          (outputTokens / 1e6 * pricing.outputPerMTok) +
+          (cacheCreationTokens / 1e6 * pricing.inputPerMTok * 1.25) +
+          (cacheReadTokens / 1e6 * pricing.inputPerMTok * 0.1);
+      costLabel = '~\$${cost.toStringAsFixed(5)}';
+    }
+
+    debugPrint('[COST] $callLabel | $model | '
+        'in=$inputTokens out=$outputTokens '
+        'cacheWrite=$cacheCreationTokens cacheRead=$cacheReadTokens | '
+        '$costLabel');
+  }
+
   // ── Sanitization ───────────────────────────────────────────────────────────
 
   /// Sanitizes user-supplied text before inclusion in any Claude prompt.
@@ -271,6 +328,20 @@ class CloudflareWorkerService {
         .replaceAll('`', '');
   }
 
+  /// Strips a markdown code fence Claude occasionally wraps JSON output in
+  /// despite the prompt saying not to (```json ... ``` or ``` ... ```).
+  /// Returns the input unchanged, trimmed, if it isn't fenced.
+  static String stripMarkdownFences(String raw) {
+    var cleaned = raw.trim();
+    if (cleaned.startsWith('```')) {
+      cleaned = cleaned
+          .replaceFirst(RegExp(r'^```(?:json)?\s*'), '')
+          .replaceFirst(RegExp(r'\s*```$'), '')
+          .trim();
+    }
+    return cleaned;
+  }
+
   /// Wraps sanitized user text in XML delimiters to structurally separate
   /// it from system instructions. Never interpolate raw input into prompts.
   static String wrap(String sanitizedText) {
@@ -281,7 +352,10 @@ class CloudflareWorkerService {
 
   /// Sends a prompt to Claude via the Cloudflare Worker proxy.
   /// Returns the response text or throws a [CloudflareApiException].
+  /// [callLabel] identifies the caller for the [_logUsage] cost log — see
+  /// that method's doc for why it's required rather than optional.
   static Future<String> sendPrompt({
+    required String callLabel,
     required String systemPrompt,
     required String userMessage,
     int maxTokens = 2000,
@@ -312,6 +386,7 @@ class CloudflareWorkerService {
 
       if (response.statusCode == 200) {
         final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+        _logUsage(callLabel, model, decoded);
         final content = decoded['content'] as List<dynamic>?;
         if (content != null && content.isNotEmpty) {
           final first = content.first as Map<String, dynamic>;
@@ -346,6 +421,7 @@ class CloudflareWorkerService {
   /// Concatenates ALL text blocks in the response (not just the first) since
   /// tool-using responses interleave text, tool_use, and tool_result blocks.
   static Future<String> sendPromptWithWebSearch({
+    required String callLabel,
     required String systemPrompt,
     required String userMessage,
     int maxTokens = 4000,
@@ -373,6 +449,7 @@ class CloudflareWorkerService {
 
       if (response.statusCode == 200) {
         final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+        _logUsage(callLabel, _modelGenerate, decoded);
         final content = decoded['content'] as List<dynamic>?;
         if (content == null || content.isEmpty) {
           throw const CloudflareApiException('Empty response from Claude API');
@@ -460,6 +537,7 @@ JSON structure to return:
       "gpa": null,
       "honors": null,
       "entryType": "degree",
+      "uncertaintyReason": "",
       "isAIPrefilled": true
     }
   ],
@@ -500,12 +578,17 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
     final userMessage =
         'Extract all resume information from this document:\n\n${wrap(sanitized)}';
 
-    return sendPrompt(
-      systemPrompt: systemPrompt,
-      userMessage: userMessage,
-      maxTokens: 8000,
-      model: _modelExtract,
-      timeout: timeout,
+    return DevExtractionCache.cachedOrCall(
+      label: 'extractResumeFields',
+      content: utf8.encode(rawDocumentText),
+      call: () => sendPrompt(
+        callLabel: 'extractResumeFields',
+        systemPrompt: systemPrompt,
+        userMessage: userMessage,
+        maxTokens: 8000,
+        model: _modelExtract,
+        timeout: timeout,
+      ),
     );
   }
 
@@ -567,6 +650,7 @@ JSON structure to return:
       "gpa": null,
       "honors": null,
       "entryType": "degree",
+      "uncertaintyReason": "",
       "isAIPrefilled": true
     }
   ],
@@ -607,7 +691,7 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
     final base64Pdf = base64Encode(pdfBytes);
 
     final body = jsonEncode({
-      'model': _modelGenerate,
+      'model': _modelExtract,
       'max_tokens': 8000,
       'system': systemPrompt,
       'messages': [
@@ -631,42 +715,49 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
       ],
     });
 
-    try {
-      final response = await client
-          .post(
-            Uri.parse(AppConstants.cloudflareWorkerUrl),
-            headers: {'Content-Type': 'application/json'},
-            body: body,
-          )
-          .timeout(_webSearchTimeout);
+    return DevExtractionCache.cachedOrCall(
+      label: 'extractResumeFieldsFromPdf',
+      content: pdfBytes,
+      call: () async {
+        try {
+          final response = await client
+              .post(
+                Uri.parse(AppConstants.cloudflareWorkerUrl),
+                headers: {'Content-Type': 'application/json'},
+                body: body,
+              )
+              .timeout(_webSearchTimeout);
 
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-        final content = decoded['content'] as List<dynamic>?;
-        if (content != null && content.isNotEmpty) {
-          final first = content.first as Map<String, dynamic>;
-          return first['text'] as String? ?? '';
+          if (response.statusCode == 200) {
+            final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+            _logUsage('extractResumeFieldsFromPdf', _modelExtract, decoded);
+            final content = decoded['content'] as List<dynamic>?;
+            if (content != null && content.isNotEmpty) {
+              final first = content.first as Map<String, dynamic>;
+              return first['text'] as String? ?? '';
+            }
+            throw const CloudflareApiException('Empty response from Claude API');
+          } else if (response.statusCode == 413) {
+            throw const CloudflareApiException(
+                'PDF file is too large for direct analysis. Try uploading fewer pages.');
+          } else if (response.statusCode == 429) {
+            throw const CloudflareApiException(
+                'Too many requests. Please wait a moment and try again.');
+          } else {
+            throw CloudflareApiException(
+                'API error ${response.statusCode}. Please try again.');
+          }
+        } on CloudflareApiException {
+          rethrow;
+        } catch (e) {
+          if (e.toString().contains('TimeoutException')) {
+            throw const CloudflareApiException(
+                'Request timed out. The document may be too complex — try uploading fewer pages at a time.');
+          }
+          throw CloudflareApiException('Connection failed: ${e.toString()}');
         }
-        throw const CloudflareApiException('Empty response from Claude API');
-      } else if (response.statusCode == 413) {
-        throw const CloudflareApiException(
-            'PDF file is too large for direct analysis. Try uploading fewer pages.');
-      } else if (response.statusCode == 429) {
-        throw const CloudflareApiException(
-            'Too many requests. Please wait a moment and try again.');
-      } else {
-        throw CloudflareApiException(
-            'API error ${response.statusCode}. Please try again.');
-      }
-    } on CloudflareApiException {
-      rethrow;
-    } catch (e) {
-      if (e.toString().contains('TimeoutException')) {
-        throw const CloudflareApiException(
-            'Request timed out. The document may be too complex — try uploading fewer pages at a time.');
-      }
-      throw CloudflareApiException('Connection failed: ${e.toString()}');
-    }
+      },
+    );
   }
 
   // ── Image-based resume extraction (Claude vision) ────────────────────────
@@ -733,6 +824,7 @@ JSON structure to return:
       "gpa": null,
       "honors": null,
       "entryType": "degree",
+      "uncertaintyReason": "",
       "isAIPrefilled": true
     }
   ],
@@ -796,42 +888,50 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
       ],
     });
 
-    try {
-      final response = await client
-          .post(
-            Uri.parse(AppConstants.cloudflareWorkerUrl),
-            headers: {'Content-Type': 'application/json'},
-            body: body,
-          )
-          .timeout(_webSearchTimeout);
+    return DevExtractionCache.cachedOrCall(
+      label: 'extractResumeFieldsFromImage:$mediaType',
+      content: imageBytes,
+      call: () async {
+        try {
+          final response = await client
+              .post(
+                Uri.parse(AppConstants.cloudflareWorkerUrl),
+                headers: {'Content-Type': 'application/json'},
+                body: body,
+              )
+              .timeout(_webSearchTimeout);
 
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-        final content = decoded['content'] as List<dynamic>?;
-        if (content != null && content.isNotEmpty) {
-          final first = content.first as Map<String, dynamic>;
-          return first['text'] as String? ?? '';
+          if (response.statusCode == 200) {
+            final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+            _logUsage('extractResumeFieldsFromImage:$mediaType', _modelExtract,
+                decoded);
+            final content = decoded['content'] as List<dynamic>?;
+            if (content != null && content.isNotEmpty) {
+              final first = content.first as Map<String, dynamic>;
+              return first['text'] as String? ?? '';
+            }
+            throw const CloudflareApiException('Empty response from Claude API');
+          } else if (response.statusCode == 413) {
+            throw const CloudflareApiException(
+                'Image file is too large. Please use an image under 5 MB.');
+          } else if (response.statusCode == 429) {
+            throw const CloudflareApiException(
+                'Too many requests. Please wait a moment and try again.');
+          } else {
+            throw CloudflareApiException(
+                'API error ${response.statusCode}. Please try again.');
+          }
+        } on CloudflareApiException {
+          rethrow;
+        } catch (e) {
+          if (e.toString().contains('TimeoutException')) {
+            throw const CloudflareApiException(
+                'Request timed out. Image analysis can take longer — please try again.');
+          }
+          throw CloudflareApiException('Connection failed: ${e.toString()}');
         }
-        throw const CloudflareApiException('Empty response from Claude API');
-      } else if (response.statusCode == 413) {
-        throw const CloudflareApiException(
-            'Image file is too large. Please use an image under 5 MB.');
-      } else if (response.statusCode == 429) {
-        throw const CloudflareApiException(
-            'Too many requests. Please wait a moment and try again.');
-      } else {
-        throw CloudflareApiException(
-            'API error ${response.statusCode}. Please try again.');
-      }
-    } on CloudflareApiException {
-      rethrow;
-    } catch (e) {
-      if (e.toString().contains('TimeoutException')) {
-        throw const CloudflareApiException(
-            'Request timed out. Image analysis can take longer — please try again.');
-      }
-      throw CloudflareApiException('Connection failed: ${e.toString()}');
-    }
+      },
+    );
   }
 
   // ── Job posting extraction ────────────────────────────────────────────────
@@ -873,6 +973,7 @@ Guidelines:
         'Extract all relevant information from this job posting:\n\n${wrap(sanitized)}';
 
     return sendPrompt(
+      callLabel: 'extractJobPosting(dead-CloudflareWorkerService)',
       systemPrompt: systemPrompt,
       userMessage: userMessage,
       maxTokens: 2000,
@@ -909,9 +1010,10 @@ Guidelines:
           [];
 
       var entryType = e['entryType'] as String?;
-      if (entryType != 'employment' &&
+      final fromFallback = entryType != 'employment' &&
           entryType != 'education_training' &&
-          entryType != 'uncertain') {
+          entryType != 'uncertain';
+      if (fromFallback) {
         final isTraining = ResumeSanitizer.fallbackTrainingCompanyPatterns
             .any((p) => company.toLowerCase().contains(p));
         entryType = isTraining ? 'education_training' : 'employment';
@@ -928,8 +1030,8 @@ Guidelines:
             'credentialId': null,
             'isAIPrefilled': true,
           });
-          debugPrint(
-              '[CLASSIFY] experience → training, moved to certifications: $title @ $company');
+          debugPrint('[CLASSIFY] experience → training, moved to '
+              'certifications ${fromFallback ? '(fallback keyword list)' : '(model)'}: $title @ $company');
         case 'uncertain':
           final reason = (e['uncertaintyReason'] as String?)?.trim();
           pending.add(PendingEntryDecision(
@@ -943,8 +1045,10 @@ Guidelines:
             kind: PendingDecisionKind.employmentVsTraining,
             rawEntry: e,
           ));
-          debugPrint('[CLASSIFY] experience → uncertain: $title @ $company');
+          debugPrint('[CLASSIFY] experience → uncertain (model): $title @ $company');
         default: // 'employment'
+          debugPrint('[CLASSIFY] experience → employment '
+              '${fromFallback ? '(fallback keyword list)' : '(model)'}: $title @ $company');
           // Bullet cap intentionally does NOT run here — it runs once, in
           // parseFieldMappings, after dedup. Capping before dedup and
           // capping after dedup can select different bullets when two
@@ -958,43 +1062,75 @@ Guidelines:
     return (employment: employment, promotedCerts: promotedCerts, pending: pending);
   }
 
-  /// Splits raw education entries into confident degree entries and entries
-  /// promoted to certifications (non-degree training/certificate programs).
-  static ({List<dynamic> degrees, List<dynamic> promotedCerts})
-      _classifyEducationEntries(List<dynamic> entries) {
+  /// Splits raw education entries into confident degree entries, entries
+  /// promoted to certifications (non-degree training/certificate programs),
+  /// and entries the model could not confidently classify. Same structural
+  /// pattern as [_classifyExperienceEntries] and [_classifyCertifications]:
+  /// structured field first, fallback keyword list only when the field is
+  /// missing/invalid, pending decision for genuine ambiguity — never a
+  /// silent guess. Fallback keyword matching only ever resolves to "degree"
+  /// or "non_degree_training" (never "uncertain") — same precedent as
+  /// award_recognition below: novel/ambiguous categories are
+  /// model-classification-only, not something a keyword list should guess at.
+  static ({
+    List<dynamic> degrees,
+    List<dynamic> promotedCerts,
+    List<PendingEntryDecision> pending,
+  }) _classifyEducationEntries(List<dynamic> entries) {
     final degrees = <dynamic>[];
     final promotedCerts = <dynamic>[];
+    final pending = <PendingEntryDecision>[];
 
     for (final raw in entries) {
       final e = raw as Map<String, dynamic>;
       final institution = e['institution'] as String? ?? '';
+      final degree = e['degree'] as String? ?? '';
 
       var entryType = e['entryType'] as String?;
-      if (entryType != 'degree' && entryType != 'non_degree_training') {
+      final fromFallback = entryType != 'degree' &&
+          entryType != 'non_degree_training' &&
+          entryType != 'uncertain';
+      if (fromFallback) {
         final isTraining = ResumeSanitizer.fallbackNonDegreeInstitutionPatterns
             .any((p) => institution.toLowerCase().contains(p));
         entryType = isTraining ? 'non_degree_training' : 'degree';
       }
 
-      if (entryType == 'non_degree_training') {
-        final degree = e['degree'] as String? ?? '';
-        promotedCerts.add({
-          'id': 'uuid-placeholder',
-          'name': degree.isNotEmpty ? degree : institution,
-          'issuer': institution,
-          'dateEarned': e['graduationYear'] as String? ?? '',
-          'expiresDate': null,
-          'credentialId': null,
-          'isAIPrefilled': true,
-        });
-        debugPrint(
-            '[CLASSIFY] education → non-degree training, moved to certifications: $institution');
-      } else {
-        degrees.add(e);
+      switch (entryType) {
+        case 'non_degree_training':
+          promotedCerts.add({
+            'id': 'uuid-placeholder',
+            'name': degree.isNotEmpty ? degree : institution,
+            'issuer': institution,
+            'dateEarned': e['graduationYear'] as String? ?? '',
+            'expiresDate': null,
+            'credentialId': null,
+            'isAIPrefilled': true,
+          });
+          debugPrint('[CLASSIFY] education → non-degree training, moved to '
+              'certifications ${fromFallback ? '(fallback keyword list)' : '(model)'}: $institution');
+        case 'uncertain':
+          final reason = (e['uncertaintyReason'] as String?)?.trim();
+          pending.add(PendingEntryDecision(
+            id: _uuid.v4(),
+            rawTitle: degree,
+            rawCompany: institution,
+            rawBullets: const [],
+            uncertaintyReason: (reason == null || reason.isEmpty)
+                ? 'Not sure if this is a degree program or non-degree training.'
+                : reason,
+            kind: PendingDecisionKind.degreeVsNonDegreeTraining,
+            rawEntry: e,
+          ));
+          debugPrint('[CLASSIFY] education → uncertain (model): $institution');
+        default: // 'degree'
+          debugPrint('[CLASSIFY] education → degree '
+              '${fromFallback ? '(fallback keyword list)' : '(model)'}: $institution');
+          degrees.add(e);
       }
     }
 
-    return (degrees: degrees, promotedCerts: promotedCerts);
+    return (degrees: degrees, promotedCerts: promotedCerts, pending: pending);
   }
 
   /// Filters out skills the model tagged (or the fallback structurally
@@ -1040,10 +1176,11 @@ Guidelines:
       final name = c['name'] as String? ?? '';
 
       var certType = c['certType'] as String?;
-      if (certType != 'credential' &&
+      final fromFallback = certType != 'credential' &&
           certType != 'compliance_training' &&
           certType != 'award_recognition' &&
-          certType != 'uncertain') {
+          certType != 'uncertain';
+      if (fromFallback) {
         // award_recognition has no fallback keyword list on purpose — award
         // names vary too much by field to safely pattern-match, and this
         // fix is specifically about NOT building that kind of list. It's
@@ -1056,10 +1193,13 @@ Guidelines:
 
       switch (certType) {
         case 'compliance_training':
-          debugPrint('[CLASSIFY] cert dropped as compliance training: $name');
+          debugPrint('[CLASSIFY] cert dropped as compliance training '
+              '${fromFallback ? '(fallback keyword list)' : '(model)'}: $name');
         case 'award_recognition':
+          // No fallback path can produce this (see comment above), so it's
+          // always model-classified — no need to print the origin.
           debugPrint('[CLASSIFY] cert dropped as award/recognition '
-              '(not a certification): $name');
+              '(not a certification, model): $name');
         case 'uncertain':
           final reason = (c['certUncertaintyReason'] as String?)?.trim();
           pending.add(PendingEntryDecision(
@@ -1073,8 +1213,10 @@ Guidelines:
             kind: PendingDecisionKind.credentialVsCompliance,
             rawEntry: c,
           ));
-          debugPrint('[CLASSIFY] cert → uncertain: $name');
+          debugPrint('[CLASSIFY] cert → uncertain (model): $name');
         default: // 'credential'
+          debugPrint('[CLASSIFY] cert → credential '
+              '${fromFallback ? '(fallback keyword list)' : '(model)'}: $name');
           credentials.add(c);
       }
     }
@@ -1090,14 +1232,7 @@ Guidelines:
   /// silently guessed). Ephemeral — never persisted.
   static ExtractionParseResult parseFieldMappings(String extractedJson) {
     try {
-      // Claude occasionally wraps JSON in markdown fences despite the prompt.
-      var cleaned = extractedJson.trim();
-      if (cleaned.startsWith('```')) {
-        cleaned = cleaned
-            .replaceFirst(RegExp(r'^```(?:json)?\s*'), '')
-            .replaceFirst(RegExp(r'\s*```$'), '')
-            .trim();
-      }
+      final cleaned = stripMarkdownFences(extractedJson);
       // Sanitize every string in the decoded response before it can reach
       // a Hive-backed content field — Claude's own rewriting can introduce
       // a blocked character (e.g. turning a source comma into a semicolon)
@@ -1155,6 +1290,7 @@ Guidelines:
 
       final rawEducation = data['education'] as List<dynamic>? ?? [];
       final eduResult = _classifyEducationEntries(rawEducation);
+      pendingDecisions.addAll(eduResult.pending);
       // Completion-aware dedup: a degree extracted at multiple levels of
       // completeness (bare, in-progress, completed) across document
       // sections collapses to one entry — the completed one wins.

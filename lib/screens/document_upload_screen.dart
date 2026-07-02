@@ -637,9 +637,18 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
   /// Splits a large PDF into 4-page chunks, sends each to Claude sequentially,
   /// and merges the results. Updates the extracting-view progress label live.
   /// Timed-out chunks are skipped; a note is shown on the confirmation screen.
+  ///
+  /// chunkSize was reduced to 2 at some point without this doc comment being
+  /// updated (it still said "4-page chunks"). Restored to 4 per the
+  /// efficiency audit: fewer chunks means fewer full system-prompt resends
+  /// and round trips per document, at the same per-chunk char cap below.
+  /// Not re-validated against a live extraction A/B run — watch entry counts
+  /// and the [_skippedPagesNote] timeout-skip rate in real usage (the FIX 9
+  /// cost logging makes per-call timing visible) and drop back toward 2 if
+  /// larger chunks visibly hurt completeness or start timing out more.
   Future<String> _extractInChunks(
       PdfTextExtractor extractor, int pageCount) async {
-    const chunkSize = 2;
+    const chunkSize = 4;
     final chunkJsons = <String>[];
     final skippedRanges = <String>[];
 
@@ -661,8 +670,14 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
       // Watermark removal runs before the char cap so noise doesn't eat budget.
       var cleaned = _removeWatermarkNoise(_normalizeWhitespace(chunkText));
       // Hard cap per chunk — prevents enormous ACE table pages from
-      // exceeding the 60 s response budget even at 2 pages.
-      const chunkCharLimit = 8000;
+      // exceeding the response-time budget. Scaled with chunkSize (was
+      // 8000 at chunkSize=2): a flat cap while doubling chunkSize would
+      // silently drop more real content on dense chunks — a denser first
+      // half of the chunk hitting the cap loses the whole back half, and
+      // that back half never gets its own separate chunk (the loop already
+      // moved past it). Doubling the cap alongside chunkSize preserves the
+      // original per-page truncation safety margin instead of regressing it.
+      const chunkCharLimit = 16000;
       if (cleaned.length > chunkCharLimit) {
         cleaned = cleaned.substring(0, chunkCharLimit);
       }
@@ -677,8 +692,11 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
 
       try {
         final json = await CloudflareWorkerService.extractResumeFields(
+          // Timeout raised from 60s alongside the chunk/char-cap increase —
+          // up to 2x the content per call means up to 2x the processing
+          // time in the worst case.
           contextHeader + cleaned,
-          timeout: const Duration(seconds: 60),
+          timeout: const Duration(seconds: 90),
         );
         chunkJsons.add(json);
         debugPrint('[PDF] pages ${startPage + 1}–${endPage + 1}: OK');
@@ -716,13 +734,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
     final chunks = <Map<String, dynamic>>[];
     for (final s in jsonStrings) {
       try {
-        var cleaned = s.trim();
-        if (cleaned.startsWith('```')) {
-          cleaned = cleaned
-              .replaceFirst(RegExp(r'^```(?:json)?\s*'), '')
-              .replaceFirst(RegExp(r'\s*```$'), '')
-              .trim();
-        }
+        final cleaned = CloudflareWorkerService.stripMarkdownFences(s);
         chunks.add(jsonDecode(cleaned) as Map<String, dynamic>);
       } catch (_) {}
     }
@@ -1154,23 +1166,45 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
               [],
         );
         _appendToListMapping('experience', entry);
+      } else if (decision == EntryDecision.education) {
+        final entry = Map<String, dynamic>.from(pending.rawEntry)
+          ..remove('entryType')
+          ..remove('uncertaintyReason');
+        _appendToListMapping('education', entry);
       } else if (decision == EntryDecision.certification) {
         final Map<String, dynamic> cert;
-        if (pending.kind == PendingDecisionKind.employmentVsTraining) {
-          // Came from an experience-shaped entry — convert to cert shape.
-          cert = {
-            'id': 'uuid-placeholder',
-            'name': pending.rawTitle,
-            'issuer': pending.rawCompany,
-            'dateEarned': pending.rawEntry['startDate'] as String? ?? '',
-            'expiresDate': null,
-            'credentialId': null,
-            'isAIPrefilled': true,
-          };
-        } else {
-          cert = Map<String, dynamic>.from(pending.rawEntry)
-            ..remove('certType')
-            ..remove('certUncertaintyReason');
+        switch (pending.kind) {
+          case PendingDecisionKind.employmentVsTraining:
+            // Came from an experience-shaped entry — convert to cert shape.
+            cert = {
+              'id': 'uuid-placeholder',
+              'name': pending.rawTitle,
+              'issuer': pending.rawCompany,
+              'dateEarned': pending.rawEntry['startDate'] as String? ?? '',
+              'expiresDate': null,
+              'credentialId': null,
+              'isAIPrefilled': true,
+            };
+          case PendingDecisionKind.degreeVsNonDegreeTraining:
+            // Came from an education-shaped entry — convert to cert shape,
+            // same mapping _classifyEducationEntries uses when it
+            // auto-promotes a confidently-classified non_degree_training
+            // entry (degree/institution/graduationYear → name/issuer/dateEarned).
+            final degree = pending.rawEntry['degree'] as String? ?? '';
+            cert = {
+              'id': 'uuid-placeholder',
+              'name': degree.isNotEmpty ? degree : pending.rawCompany,
+              'issuer': pending.rawCompany,
+              'dateEarned':
+                  pending.rawEntry['graduationYear'] as String? ?? '',
+              'expiresDate': null,
+              'credentialId': null,
+              'isAIPrefilled': true,
+            };
+          case PendingDecisionKind.credentialVsCompliance:
+            cert = Map<String, dynamic>.from(pending.rawEntry)
+              ..remove('certType')
+              ..remove('certUncertaintyReason');
         }
         _appendToListMapping('certifications', cert);
       }

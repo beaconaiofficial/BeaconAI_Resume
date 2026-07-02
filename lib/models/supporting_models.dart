@@ -124,13 +124,20 @@ class FieldMappingSuggestion {
 // PendingEntryDecision  (ephemeral — NEVER persisted to Hive)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The two shapes of ambiguity the extraction/tailoring model can flag.
-/// Deliberately just these two — every uncertain entry the pipeline produces
-/// is either "is this a job or training?" or "is this cert real or clutter?".
-enum PendingDecisionKind { employmentVsTraining, credentialVsCompliance }
+/// The shapes of ambiguity the extraction/tailoring model can flag: "is this
+/// a job or training?", "is this cert real or clutter?", or "is this a
+/// degree or non-degree training?".
+enum PendingDecisionKind {
+  employmentVsTraining,
+  credentialVsCompliance,
+  degreeVsNonDegreeTraining,
+}
 
-/// The bucket the user routes an uncertain entry into.
-enum EntryDecision { employment, certification, exclude }
+/// The bucket the user routes an uncertain entry into. `education` is
+/// distinct from `employment` — they route to different list fields, so
+/// resolution code must not have to also inspect [PendingDecisionKind] just
+/// to know which list an accepted decision belongs in.
+enum EntryDecision { employment, education, certification, exclude }
 
 /// Surfaced on the document-upload / wizard Path A confirmation screen when
 /// the extraction model could not confidently classify an entry as

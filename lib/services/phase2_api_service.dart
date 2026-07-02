@@ -53,10 +53,12 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
 
     final sanitized = CloudflareWorkerService.sanitize(jobPostingText);
     final response = await CloudflareWorkerService.sendPrompt(
+      callLabel: 'extractJobPosting',
       systemPrompt: systemPrompt,
       userMessage:
           'Extract structured data from this job posting:\n\n${CloudflareWorkerService.wrap(sanitized)}',
       maxTokens: 1500,
+      model: 'claude-haiku-4-5-20251001',
     );
 
     try {
@@ -267,6 +269,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     final tStart = DateTime.now();
     try {
       final rawResult = await CloudflareWorkerService.sendPrompt(
+        callLabel: 'tailoredResume.draftGeneration',
         systemPrompt: systemPrompt,
         userMessage: userMessage,
         maxTokens: 2500,
@@ -309,13 +312,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
   /// whole generation over a filtering step.
   static String _filterCertTypeInResponse(String rawResult) {
     try {
-      var cleaned = rawResult.trim();
-      if (cleaned.startsWith('```')) {
-        cleaned = cleaned
-            .replaceFirst(RegExp(r'^```(?:json)?\s*'), '')
-            .replaceFirst(RegExp(r'\s*```$'), '')
-            .trim();
-      }
+      final cleaned = CloudflareWorkerService.stripMarkdownFences(rawResult);
       final decoded = ResumeSanitizer.sanitizeAiJson(jsonDecode(cleaned))
           as Map<String, dynamic>;
       final filtered = ResumeSanitizer.filterGeneratedCertifications(decoded);
@@ -376,6 +373,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
         'below 5 against any specific posting.';
 
     final scoreResponse = await CloudflareWorkerService.sendPrompt(
+      callLabel: 'tailoredResume.relevanceScoring',
       systemPrompt: scoreSystemPrompt,
       userMessage:
           'JOB POSTING:\n$jobText\n\nEXPERIENCE ENTRIES TO SCORE:\n$entriesText',
@@ -476,6 +474,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     final sanitizedJD = CloudflareWorkerService.sanitize(jobDescription);
 
     final response = await CloudflareWorkerService.sendPrompt(
+      callLabel: 'analyzeKeywords',
       systemPrompt: systemPrompt,
       userMessage:
           'Resume content:\n${CloudflareWorkerService.wrap(sanitizedResume)}\n\n'
@@ -529,6 +528,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
 
     final sanitized = CloudflareWorkerService.sanitize(jobPostingText);
     final response = await CloudflareWorkerService.sendPrompt(
+      callLabel: 'generateBasicInterviewPrep',
       systemPrompt: systemPrompt,
       userMessage:
           'Generate role-specific interview questions for this job posting:\n\n'
@@ -603,6 +603,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     debugPrint('[COVER_LETTER] Starting generation');
     try {
       final clResult = await CloudflareWorkerService.sendPrompt(
+        callLabel: 'generateCoverLetter',
         systemPrompt: systemPrompt,
         userMessage:
             'Candidate information:\n${CloudflareWorkerService.wrap(sanitizedResume)}\n\n'

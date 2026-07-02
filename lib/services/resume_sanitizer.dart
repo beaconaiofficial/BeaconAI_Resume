@@ -628,6 +628,8 @@ class ResumeSanitizer {
         certType == 'compliance_training' ||
         certType == 'award_recognition' ||
         certType == 'uncertain') {
+      debugPrint(
+          '[ResumeSanitizer] cert → $certType (model): "${cert['name']}"');
       return certType!;
     }
     // award_recognition is model-classification-only (no fallback keyword

@@ -111,12 +111,22 @@ class PendingDecisionCard extends StatelessWidget {
                     child:
                         Text('Work Experience', style: textTheme.labelLarge),
                   ),
+                if (decision.kind ==
+                    PendingDecisionKind.degreeVsNonDegreeTraining)
+                  OutlinedButton(
+                    onPressed: () => onResolve(EntryDecision.education),
+                    child: Text('Add as Education', style: textTheme.labelLarge),
+                  ),
                 OutlinedButton(
                   onPressed: () => onResolve(EntryDecision.certification),
                   child: Text(
-                    decision.kind == PendingDecisionKind.employmentVsTraining
-                        ? 'Certification'
-                        : 'Keep as Certification',
+                    switch (decision.kind) {
+                      PendingDecisionKind.employmentVsTraining => 'Certification',
+                      PendingDecisionKind.degreeVsNonDegreeTraining =>
+                        'Add as Certification',
+                      PendingDecisionKind.credentialVsCompliance =>
+                        'Keep as Certification',
+                    },
                     style: textTheme.labelLarge,
                   ),
                 ),

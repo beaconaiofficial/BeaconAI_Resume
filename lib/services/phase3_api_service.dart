@@ -63,6 +63,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     }
 
     final response = await CloudflareWorkerService.sendPrompt(
+      callLabel: 'rewriteBullet',
       systemPrompt: systemPrompt,
       userMessage: '$userMessage\n\nGenerate 3 alternative phrasings:',
       maxTokens: 800,
@@ -128,6 +129,7 @@ Generate 3 summary alternatives:
 ''';
 
     final response = await CloudflareWorkerService.sendPrompt(
+      callLabel: 'generateSummaryOptions',
       systemPrompt: systemPrompt,
       userMessage: userMessage,
       maxTokens: 1000,
@@ -205,6 +207,7 @@ Analyze the skill gap:
 ''';
 
     final response = await CloudflareWorkerService.sendPrompt(
+      callLabel: 'analyzeSkillGap',
       systemPrompt: systemPrompt,
       userMessage: userMessage,
       maxTokens: 1200,
@@ -304,6 +307,7 @@ Generate interview questions:
 ''';
 
     final response = await CloudflareWorkerService.sendPromptWithWebSearch(
+      callLabel: 'generateProInterviewGuide',
       systemPrompt: systemPrompt,
       userMessage: userMessage,
       maxTokens: 4500,
@@ -349,6 +353,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     final sanitizedText = CloudflareWorkerService.sanitize(jobPostingText);
 
     final response = await CloudflareWorkerService.sendPrompt(
+      callLabel: 'extractCompanyAndRole',
       systemPrompt: systemPrompt,
       userMessage: CloudflareWorkerService.wrap(sanitizedText),
       maxTokens: 200,

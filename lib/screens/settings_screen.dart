@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../constants/app_constants.dart';
 import '../models/app_enums.dart';
 import '../providers/user_settings_provider.dart';
+import '../services/dev_extraction_cache.dart';
 import '../services/hive_service.dart';
 import '../theme/app_colors.dart';
 
@@ -121,6 +122,32 @@ class SettingsScreen extends ConsumerWidget {
               ),
             ],
           ),
+          // Only ever visible when DevExtractionCache._enabled has been
+          // manually flipped to true in a local debug build — invisible in
+          // every normal debug run and every release build. See FIX 8.
+          if (DevExtractionCache.isActive) ...[
+            const SizedBox(height: 20),
+            _SettingsSection(
+              title: 'Developer',
+              isDark: isDark,
+              children: [
+                _SettingsTile(
+                  icon: Icons.delete_sweep_outlined,
+                  label: 'Clear extraction cache',
+                  isDark: isDark,
+                  onTap: () async {
+                    await DevExtractionCache.clear();
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                            content: Text('Dev extraction cache cleared')),
+                      );
+                    }
+                  },
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );
