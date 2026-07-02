@@ -6,6 +6,7 @@ import '../constants/app_constants.dart';
 import '../models/supporting_models.dart';
 import 'dev_extraction_cache.dart';
 import 'resume_sanitizer.dart';
+import 'session_extraction_cache.dart';
 
 const _uuid = Uuid();
 
@@ -577,17 +578,26 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
     final sanitized = sanitize(rawDocumentText);
     final userMessage =
         'Extract all resume information from this document:\n\n${wrap(sanitized)}';
+    final content = utf8.encode(rawDocumentText);
 
-    return DevExtractionCache.cachedOrCall(
+    // Session cache (always on, production-safe) is checked first; a miss
+    // falls through to the dev cache (dev-only, gated off by default),
+    // which falls through to the real call. See each cache's own doc
+    // comment for why they're separate.
+    return SessionExtractionCache.cachedOrCall(
       label: 'extractResumeFields',
-      content: utf8.encode(rawDocumentText),
-      call: () => sendPrompt(
-        callLabel: 'extractResumeFields',
-        systemPrompt: systemPrompt,
-        userMessage: userMessage,
-        maxTokens: 8000,
-        model: _modelExtract,
-        timeout: timeout,
+      content: content,
+      call: () => DevExtractionCache.cachedOrCall(
+        label: 'extractResumeFields',
+        content: content,
+        call: () => sendPrompt(
+          callLabel: 'extractResumeFields',
+          systemPrompt: systemPrompt,
+          userMessage: userMessage,
+          maxTokens: 8000,
+          model: _modelExtract,
+          timeout: timeout,
+        ),
       ),
     );
   }
@@ -715,48 +725,57 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
       ],
     });
 
-    return DevExtractionCache.cachedOrCall(
+    // Session cache (always on, production-safe) is checked first; a miss
+    // falls through to the dev cache (dev-only, gated off by default),
+    // which falls through to the real call.
+    return SessionExtractionCache.cachedOrCall(
       label: 'extractResumeFieldsFromPdf',
       content: pdfBytes,
-      call: () async {
-        try {
-          final response = await client
-              .post(
-                Uri.parse(AppConstants.cloudflareWorkerUrl),
-                headers: {'Content-Type': 'application/json'},
-                body: body,
-              )
-              .timeout(_webSearchTimeout);
+      call: () => DevExtractionCache.cachedOrCall(
+        label: 'extractResumeFieldsFromPdf',
+        content: pdfBytes,
+        call: () async {
+          try {
+            final response = await client
+                .post(
+                  Uri.parse(AppConstants.cloudflareWorkerUrl),
+                  headers: {'Content-Type': 'application/json'},
+                  body: body,
+                )
+                .timeout(_webSearchTimeout);
 
-          if (response.statusCode == 200) {
-            final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-            _logUsage('extractResumeFieldsFromPdf', _modelExtract, decoded);
-            final content = decoded['content'] as List<dynamic>?;
-            if (content != null && content.isNotEmpty) {
-              final first = content.first as Map<String, dynamic>;
-              return first['text'] as String? ?? '';
+            if (response.statusCode == 200) {
+              final decoded =
+                  jsonDecode(response.body) as Map<String, dynamic>;
+              _logUsage('extractResumeFieldsFromPdf', _modelExtract, decoded);
+              final content = decoded['content'] as List<dynamic>?;
+              if (content != null && content.isNotEmpty) {
+                final first = content.first as Map<String, dynamic>;
+                return first['text'] as String? ?? '';
+              }
+              throw const CloudflareApiException(
+                  'Empty response from Claude API');
+            } else if (response.statusCode == 413) {
+              throw const CloudflareApiException(
+                  'PDF file is too large for direct analysis. Try uploading fewer pages.');
+            } else if (response.statusCode == 429) {
+              throw const CloudflareApiException(
+                  'Too many requests. Please wait a moment and try again.');
+            } else {
+              throw CloudflareApiException(
+                  'API error ${response.statusCode}. Please try again.');
             }
-            throw const CloudflareApiException('Empty response from Claude API');
-          } else if (response.statusCode == 413) {
-            throw const CloudflareApiException(
-                'PDF file is too large for direct analysis. Try uploading fewer pages.');
-          } else if (response.statusCode == 429) {
-            throw const CloudflareApiException(
-                'Too many requests. Please wait a moment and try again.');
-          } else {
-            throw CloudflareApiException(
-                'API error ${response.statusCode}. Please try again.');
+          } on CloudflareApiException {
+            rethrow;
+          } catch (e) {
+            if (e.toString().contains('TimeoutException')) {
+              throw const CloudflareApiException(
+                  'Request timed out. The document may be too complex — try uploading fewer pages at a time.');
+            }
+            throw CloudflareApiException('Connection failed: ${e.toString()}');
           }
-        } on CloudflareApiException {
-          rethrow;
-        } catch (e) {
-          if (e.toString().contains('TimeoutException')) {
-            throw const CloudflareApiException(
-                'Request timed out. The document may be too complex — try uploading fewer pages at a time.');
-          }
-          throw CloudflareApiException('Connection failed: ${e.toString()}');
-        }
-      },
+        },
+      ),
     );
   }
 
@@ -888,49 +907,58 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
       ],
     });
 
-    return DevExtractionCache.cachedOrCall(
+    // Session cache (always on, production-safe) is checked first; a miss
+    // falls through to the dev cache (dev-only, gated off by default),
+    // which falls through to the real call.
+    return SessionExtractionCache.cachedOrCall(
       label: 'extractResumeFieldsFromImage:$mediaType',
       content: imageBytes,
-      call: () async {
-        try {
-          final response = await client
-              .post(
-                Uri.parse(AppConstants.cloudflareWorkerUrl),
-                headers: {'Content-Type': 'application/json'},
-                body: body,
-              )
-              .timeout(_webSearchTimeout);
+      call: () => DevExtractionCache.cachedOrCall(
+        label: 'extractResumeFieldsFromImage:$mediaType',
+        content: imageBytes,
+        call: () async {
+          try {
+            final response = await client
+                .post(
+                  Uri.parse(AppConstants.cloudflareWorkerUrl),
+                  headers: {'Content-Type': 'application/json'},
+                  body: body,
+                )
+                .timeout(_webSearchTimeout);
 
-          if (response.statusCode == 200) {
-            final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-            _logUsage('extractResumeFieldsFromImage:$mediaType', _modelExtract,
-                decoded);
-            final content = decoded['content'] as List<dynamic>?;
-            if (content != null && content.isNotEmpty) {
-              final first = content.first as Map<String, dynamic>;
-              return first['text'] as String? ?? '';
+            if (response.statusCode == 200) {
+              final decoded =
+                  jsonDecode(response.body) as Map<String, dynamic>;
+              _logUsage('extractResumeFieldsFromImage:$mediaType',
+                  _modelExtract, decoded);
+              final content = decoded['content'] as List<dynamic>?;
+              if (content != null && content.isNotEmpty) {
+                final first = content.first as Map<String, dynamic>;
+                return first['text'] as String? ?? '';
+              }
+              throw const CloudflareApiException(
+                  'Empty response from Claude API');
+            } else if (response.statusCode == 413) {
+              throw const CloudflareApiException(
+                  'Image file is too large. Please use an image under 5 MB.');
+            } else if (response.statusCode == 429) {
+              throw const CloudflareApiException(
+                  'Too many requests. Please wait a moment and try again.');
+            } else {
+              throw CloudflareApiException(
+                  'API error ${response.statusCode}. Please try again.');
             }
-            throw const CloudflareApiException('Empty response from Claude API');
-          } else if (response.statusCode == 413) {
-            throw const CloudflareApiException(
-                'Image file is too large. Please use an image under 5 MB.');
-          } else if (response.statusCode == 429) {
-            throw const CloudflareApiException(
-                'Too many requests. Please wait a moment and try again.');
-          } else {
-            throw CloudflareApiException(
-                'API error ${response.statusCode}. Please try again.');
+          } on CloudflareApiException {
+            rethrow;
+          } catch (e) {
+            if (e.toString().contains('TimeoutException')) {
+              throw const CloudflareApiException(
+                  'Request timed out. Image analysis can take longer — please try again.');
+            }
+            throw CloudflareApiException('Connection failed: ${e.toString()}');
           }
-        } on CloudflareApiException {
-          rethrow;
-        } catch (e) {
-          if (e.toString().contains('TimeoutException')) {
-            throw const CloudflareApiException(
-                'Request timed out. Image analysis can take longer — please try again.');
-          }
-          throw CloudflareApiException('Connection failed: ${e.toString()}');
-        }
-      },
+        },
+      ),
     );
   }
 
