@@ -339,6 +339,19 @@ class CloudflareWorkerService {
           .replaceFirst(RegExp(r'^```(?:json)?\s*'), '')
           .replaceFirst(RegExp(r'\s*```$'), '')
           .trim();
+      return cleaned;
+    }
+    // Defense in depth: a fenced block preceded by conversational prose
+    // (e.g. "Here's the result:\n```json\n{...}\n```\n\nI focused on...")
+    // — the check above only handles a fence at the very start of the
+    // string, which a leading sentence defeats entirely even though every
+    // system prompt asks for JSON only. Extract the fenced content instead
+    // of giving up. See the P0 "tailored resume identical to master"
+    // investigation: this exact shape is what let a malformed response
+    // reach the save step undetected.
+    final fenced = RegExp(r'```(?:json)?\s*([\s\S]*?)\s*```').firstMatch(cleaned);
+    if (fenced != null) {
+      return fenced.group(1)!.trim();
     }
     return cleaned;
   }
@@ -388,6 +401,10 @@ class CloudflareWorkerService {
       if (response.statusCode == 200) {
         final decoded = jsonDecode(response.body) as Map<String, dynamic>;
         _logUsage(callLabel, model, decoded);
+        if (decoded['stop_reason'] == 'max_tokens') {
+          debugPrint('[$callLabel] TRUNCATED — hit the $maxTokens-token cap');
+          throw CloudflareTruncatedResponseException(maxTokens);
+        }
         final content = decoded['content'] as List<dynamic>?;
         if (content != null && content.isNotEmpty) {
           final first = content.first as Map<String, dynamic>;
@@ -1348,13 +1365,18 @@ Guidelines:
       pendingDecisions.addAll(certResult.pending);
 
       // Step 3: dedup experience — bare-stub duplicates first, then
-      // entries that duplicate an event already correctly classified as a
-      // certification (computed just above, so this always runs against
-      // the FINAL certifications list, never an intermediate one).
+      // substantive entries that describe the same real-world role
+      // recorded twice (e.g. from different sections of the same
+      // document), then entries that duplicate an event already correctly
+      // classified as a certification (computed just above, so this always
+      // runs against the FINAL certifications list, never an intermediate
+      // one).
       final dedupedExperience =
           ResumeSanitizer.discardBareDuplicateExperience(expResult.employment);
+      final mergedExperience =
+          ResumeSanitizer.mergeCrossDocumentDuplicateRoles(dedupedExperience);
       final finalExperienceEntries = ResumeSanitizer.dropExperienceMatchingCertification(
-          dedupedExperience, certResult.credentials);
+          mergedExperience, certResult.credentials);
 
       // Step 4: cap bullets on whatever survived dedup.
       final finalExperience = finalExperienceEntries.map((raw) {
@@ -1411,4 +1433,21 @@ class CloudflareApiException implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// Thrown by [CloudflareWorkerService.sendPrompt] when the API's own
+/// `stop_reason` field reports `max_tokens` — i.e. generation was cut off
+/// mid-output because it hit the token cap, not because anything actually
+/// went wrong with the request. A truncated response is not valid JSON
+/// (e.g. "Unterminated string in JSON at position N", where N lines up
+/// exactly with the response's char length), and downstream JSON parsing
+/// would otherwise report that as a generic, indistinguishable parse
+/// failure. Callers that care (see generateTailoredResume's Call 2) can
+/// catch this specifically to give the user an accurate, actionable
+/// message instead of a generic "something went wrong."
+class CloudflareTruncatedResponseException extends CloudflareApiException {
+  const CloudflareTruncatedResponseException(this.maxTokens)
+      : super('Response was cut off after reaching the $maxTokens-token '
+            'limit before it could finish.');
+  final int maxTokens;
 }

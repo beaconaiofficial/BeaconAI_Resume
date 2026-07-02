@@ -62,19 +62,21 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     );
 
     try {
+      final cleaned = CloudflareWorkerService.stripMarkdownFences(response);
       final data =
-          ResumeSanitizer.sanitizeAiJson(jsonDecode(response)) as Map<String, dynamic>;
+          ResumeSanitizer.sanitizeAiJson(jsonDecode(cleaned)) as Map<String, dynamic>;
       return JobPostingData.fromJson(data);
-    } catch (_) {
-      return const JobPostingData(
-        roleTitle: '',
-        companyName: '',
-        requiredSkills: [],
-        preferredSkills: [],
-        keywords: [],
-        responsibilities: [],
-        qualifications: [],
-      );
+    } catch (e) {
+      // Do NOT silently return blank job-posting data — that looks like a
+      // successful extraction with an empty result, not a failure, and the
+      // confirmation screen would show up with no role/skills/keywords
+      // with nothing telling the user extraction actually failed. Let the
+      // caller's existing CloudflareApiException/catch(e) handling (see
+      // _onExtractJobPosting in create_tailored_resume_screen.dart) show a
+      // real error instead.
+      debugPrint('[EXTRACT_JOB_POSTING] JSON parse failed: $e');
+      debugPrint('[EXTRACT_JOB_POSTING] Raw response: $response');
+      rethrow;
     }
   }
 
@@ -85,10 +87,23 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
   ///   Call 1 (Haiku): score filtered entries for relevance.
   ///   Call 2 (Sonnet): generate resume from top 3 pre-selected entries.
   /// Rule §3: User reviews the draft before it is saved.
+  ///
+  /// [cachedTop3] — if provided, Call 1 (relevance scoring) is skipped
+  /// entirely and this list is used as-is. Lets a caller retry only Call 2
+  /// after a Call 2-specific failure without re-scoring relevance (and
+  /// re-billing Haiku) from scratch — see [onEntriesSelected], which the
+  /// caller uses to capture Call 1's result the first time so it can be
+  /// passed back in as [cachedTop3] on a retry.
+  ///
+  /// [onEntriesSelected] fires once Call 1's result (fresh or cached) is
+  /// known, before Call 2 starts, so the caller can stash it for a future
+  /// retry attempt.
   static Future<String> generateTailoredResume({
     required ResumeRenderData masterData,
     required JobPostingData jobPosting,
     void Function(String message)? onProgress,
+    List<ExperienceEntry>? cachedTop3,
+    void Function(List<ExperienceEntry> top3)? onEntriesSelected,
   }) async {
     // ── PRE-PROCESSING ────────────────────────────────────────────────────────
     final original = masterData.experience;
@@ -159,20 +174,18 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
         '${droppedAsDupe.map((e) => e.title).toList()}');
 
     // ── CALL 1: RELEVANCE SCORING (Haiku) ─────────────────────────────────────
-    onProgress?.call('Analyzing job requirements...');
-
-    List<ExperienceEntry> top3;
-    if (filtered.isEmpty) {
-      top3 = [];
+    final List<ExperienceEntry> top3;
+    if (cachedTop3 != null) {
+      debugPrint('[CALL 1] Using cached relevance scores from a prior '
+          'attempt in this session — not re-invoking Call 1');
+      top3 = cachedTop3;
     } else {
-      try {
-        top3 = await _scoreAndSelectEntries(jobPosting, filtered);
-      } catch (e) {
-        debugPrint('[CALL 1] Failed ($e) — '
-            'using all ${filtered.length} filtered entries as fallback');
-        top3 = filtered.take(3).toList();
-      }
+      onProgress?.call('Analyzing job requirements...');
+      top3 = filtered.isEmpty
+          ? <ExperienceEntry>[]
+          : await _scoreAndSelectEntriesWithRetry(jobPosting, filtered);
     }
+    onEntriesSelected?.call(top3);
 
     // ── BUILD TRIMMED PAYLOAD ─────────────────────────────────────────────────
     onProgress?.call('Building your tailored resume...');
@@ -250,6 +263,8 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     const systemPrompt = '''
 You are an expert resume writer creating a targeted one-page resume.
 
+Return ONLY valid JSON with no explanation, no markdown, no code fences.
+
 Rules — follow every one of these exactly:
 
 1. Use ONLY the experience entries provided. Do not add, invent, or reference any other experience.
@@ -268,11 +283,20 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
 
     final tStart = DateTime.now();
     try {
+      // 2500 truncated a real production run at 7348 chars (confirmed via
+      // stop_reason == 'max_tokens', not a parsing glitch) even with input
+      // now properly capped to a scored top 3 entries by
+      // _scoreAndSelectEntriesWithRetry — a one-page resume's JSON
+      // (structure overhead, certType per certification, jargon expanded
+      // into plain language which tends to lengthen text, not shorten it)
+      // can genuinely need more headroom than that. Raising the cap only
+      // costs anything if output actually needs it — the API bills for
+      // tokens generated, not the cap itself.
       final rawResult = await CloudflareWorkerService.sendPrompt(
         callLabel: 'tailoredResume.draftGeneration',
         systemPrompt: systemPrompt,
         userMessage: userMessage,
-        maxTokens: 2500,
+        maxTokens: 4096,
       );
       final ms = DateTime.now().difference(tStart).inMilliseconds;
       debugPrint('[CALL 2] Generation complete in ${ms}ms');
@@ -307,26 +331,69 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
   /// (Claude's own rewriting can introduce a blocked character the user
   /// never typed), and applies
   /// [ResumeSanitizer.filterGeneratedCertifications] to its certifications
-  /// array using the model's own certType tag. If the response can't be
-  /// parsed as JSON, logs and returns it unmodified rather than failing the
-  /// whole generation over a filtering step.
+  /// array using the model's own certType tag.
+  ///
+  /// Deliberately does NOT catch-and-return-the-raw-result on a parse
+  /// failure. That used to be the behavior here, reasoned as "don't fail
+  /// the whole generation over a filtering step" — but when the response
+  /// can't be parsed as JSON at all (not just missing a certType field),
+  /// there is no usable result to fail over: returning the raw text let an
+  /// unparseable response masquerade as a successful generation all the way
+  /// to the save step, where it silently triggered a fallback that copied
+  /// the MASTER resume's content onto the new tailored resume — the root
+  /// cause of the "tailored resume identical to master" P0. Letting this
+  /// throw means generateTailoredResume's own catch-all (below) converts it
+  /// into the same CloudflareApiException every other failure in this flow
+  /// already produces, so the caller's existing error UI handles it
+  /// correctly and no Resume record is ever created for a failed generation.
   static String _filterCertTypeInResponse(String rawResult) {
+    final cleaned = CloudflareWorkerService.stripMarkdownFences(rawResult);
+    final decoded = ResumeSanitizer.sanitizeAiJson(jsonDecode(cleaned))
+        as Map<String, dynamic>;
+    final filtered = ResumeSanitizer.filterGeneratedCertifications(decoded);
+    return jsonEncode(filtered);
+  }
+
+  /// Runs [_scoreAndSelectEntries] with one automatic, scoped retry (cheap —
+  /// Haiku, 800 max tokens, 30s timeout) before giving up.
+  ///
+  /// Deliberately does NOT fall back to "use all/first N entries unscored"
+  /// on final failure — that used to be the behavior here, and real
+  /// production logs showed it firing on effectively every run, silently
+  /// discarding correct relevance scores (Motor Transport correctly scored
+  /// 0/10, network entries scored 9-10/10) because of a parsing bug, not a
+  /// scoring problem, and shipping an unfiltered/arbitrary entry selection
+  /// that LOOKED like a real tailored result but wasn't. Relevance
+  /// filtering is the entire point of this call; a plausible-looking
+  /// result built on a failure is worse than a visible failure. If the
+  /// retry also fails, this throws a CloudflareApiException so the
+  /// caller's existing error UI (create_tailored_resume_screen.dart's
+  /// _onGenerateDraft) shows a real failure instead of silently proceeding.
+  static Future<List<ExperienceEntry>> _scoreAndSelectEntriesWithRetry(
+    JobPostingData jobPosting,
+    List<ExperienceEntry> entries,
+  ) async {
     try {
-      final cleaned = CloudflareWorkerService.stripMarkdownFences(rawResult);
-      final decoded = ResumeSanitizer.sanitizeAiJson(jsonDecode(cleaned))
-          as Map<String, dynamic>;
-      final filtered = ResumeSanitizer.filterGeneratedCertifications(decoded);
-      return jsonEncode(filtered);
+      return await _scoreAndSelectEntries(jobPosting, entries);
     } catch (e) {
-      debugPrint('[CALL 2] Could not parse response to filter certType '
-          '($e) — returning raw result unfiltered');
-      return rawResult;
+      debugPrint('[CALL 1] First attempt failed ($e) — retrying once');
+      try {
+        return await _scoreAndSelectEntries(jobPosting, entries);
+      } catch (e2) {
+        debugPrint('[CALL 1] Retry also failed ($e2) — surfacing a real '
+            'failure instead of silently using unfiltered entries');
+        throw const CloudflareApiException(
+          'Unable to determine which experience is most relevant to this '
+          'role. Please try again.',
+        );
+      }
     }
   }
 
   /// Scores filtered experience entries using Haiku and returns the top 3.
   /// Threshold: ≥5 (strict). Falls back to ≥3 if fewer than 2 qualify.
-  /// Throws on API or parse failure — caller falls back to unscored entries.
+  /// Throws on API or parse failure — see
+  /// [_scoreAndSelectEntriesWithRetry] for what the caller does with that.
   static Future<List<ExperienceEntry>> _scoreAndSelectEntries(
     JobPostingData jobPosting,
     List<ExperienceEntry> entries,
@@ -360,7 +427,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     const scoreSystemPrompt =
         'You are a resume expert. Score each experience entry for relevance to '
         'the provided job posting.\n'
-        'Return ONLY valid JSON with no other text, no markdown, no code blocks.\n'
+        'Return ONLY valid JSON with no explanation, no markdown, no code fences.\n'
         'Schema: {"scores": [{"id": "string", "score": 0, "reason": "string"}]}\n'
         'Score 0–10:\n'
         '10 = directly matches the job title and core responsibilities\n'
@@ -384,7 +451,8 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
 
     Map<String, dynamic> parsed;
     try {
-      parsed = jsonDecode(scoreResponse) as Map<String, dynamic>;
+      final cleaned = CloudflareWorkerService.stripMarkdownFences(scoreResponse);
+      parsed = jsonDecode(cleaned) as Map<String, dynamic>;
     } catch (e) {
       debugPrint('[CALL 1] JSON parse failed: $e');
       debugPrint('[CALL 1] Raw response: $scoreResponse');
@@ -484,17 +552,19 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     );
 
     try {
-      final data = ResumeSanitizer.sanitizeAiJson(jsonDecode(response))
+      final cleaned = CloudflareWorkerService.stripMarkdownFences(response);
+      final data = ResumeSanitizer.sanitizeAiJson(jsonDecode(cleaned))
           as Map<String, dynamic>;
       return AtsAnalysis.fromJson(data);
-    } catch (_) {
-      return const AtsAnalysis(
-        score: 0,
-        matchedKeywords: [],
-        missingKeywords: [],
-        partialMatches: [],
-        suggestions: ['Unable to analyze — please try again.'],
-      );
+    } catch (e) {
+      // Do NOT silently return a "score: 0" result — that renders as a real
+      // (if bad) ATS score, not a failure, with no signal to the user that
+      // analysis didn't actually run. Let the caller's existing
+      // CloudflareApiException/catch(e) handling (see
+      // ats_analyzer_screen.dart) show a real error instead.
+      debugPrint('[ANALYZE_KEYWORDS] JSON parse failed: $e');
+      debugPrint('[ANALYZE_KEYWORDS] Raw response: $response');
+      rethrow;
     }
   }
 
@@ -537,12 +607,20 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     );
 
     try {
-      final list = ResumeSanitizer.sanitizeAiJson(jsonDecode(response)) as List<dynamic>;
+      final cleaned = CloudflareWorkerService.stripMarkdownFences(response);
+      final list = ResumeSanitizer.sanitizeAiJson(jsonDecode(cleaned)) as List<dynamic>;
       return list
           .map((item) => InterviewQA.fromJson(item as Map<String, dynamic>))
           .toList();
-    } catch (_) {
-      return [];
+    } catch (e) {
+      // Do NOT silently return an empty list — that renders as "no
+      // role-specific questions for this posting", not a failure, with no
+      // signal anything went wrong. Let the caller's existing
+      // CloudflareApiException/catch(e) handling (see
+      // interview_prep_basic_screen.dart) show a real error instead.
+      debugPrint('[BASIC_INTERVIEW_PREP] JSON parse failed: $e');
+      debugPrint('[BASIC_INTERVIEW_PREP] Raw response: $response');
+      rethrow;
     }
   }
 

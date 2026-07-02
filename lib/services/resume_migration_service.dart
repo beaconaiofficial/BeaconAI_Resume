@@ -103,6 +103,7 @@ class ResumeMigrationService {
     final box = HiveService.resumeSectionBox;
     var reclassified = 0;
     var deduped = 0;
+    var crossDocMerged = 0;
     var crossReferenceDropped = 0;
     var bulletCapped = 0;
     var certsFlagged = 0;
@@ -226,11 +227,19 @@ class ResumeMigrationService {
       final afterBareDedup = ResumeSanitizer.discardBareDuplicateExperience(expKept);
       deduped += expKept.length - afterBareDedup.length;
 
+      // Merge substantive entries that confidently describe the same
+      // real-world role recorded twice (same fuzzy-matched company + title
+      // + genuine date-range overlap) — the case discardBareDuplicateExperience
+      // deliberately leaves alone (see its own doc comment).
+      final afterCrossDocMerge =
+          ResumeSanitizer.mergeCrossDocumentDuplicateRoles(afterBareDedup);
+      crossDocMerged += afterBareDedup.length - afterCrossDocMerge.length;
+
       // Drop entries that duplicate an event already correctly classified
       // as a certification above (same title, cert date within range).
       final afterCrossRef = ResumeSanitizer.dropExperienceMatchingCertification(
-          afterBareDedup, flaggedEntries);
-      crossReferenceDropped += afterBareDedup.length - afterCrossRef.length;
+          afterCrossDocMerge, flaggedEntries);
+      crossReferenceDropped += afterCrossDocMerge.length - afterCrossRef.length;
 
       // Cap bullets on whatever survived dedup.
       final afterCap = afterCrossRef.map((raw) {
@@ -247,6 +256,7 @@ class ResumeMigrationService {
 
       if (reclassified > 0 ||
           deduped > 0 ||
+          crossDocMerged > 0 ||
           crossReferenceDropped > 0 ||
           bulletCapped > 0) {
         changed = true;
@@ -279,7 +289,7 @@ class ResumeMigrationService {
     return _ResumeSanitizeResult(
       changed: changed,
       reclassified: reclassified,
-      deduped: deduped + crossReferenceDropped,
+      deduped: deduped + crossDocMerged + crossReferenceDropped,
       bulletCapped: bulletCapped,
       certsFlagged: certsFlagged,
       educationDeduped: educationDeduped,

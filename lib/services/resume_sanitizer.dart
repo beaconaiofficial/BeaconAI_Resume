@@ -87,7 +87,11 @@ class ResumeSanitizer {
   // of the same event (Priority 3 fix), not just bare-stub duplicates.
   // v3: added deduplicateEducation — completion-aware education dedup
   // (Priority 4 fix).
-  static const int currentSanitizationVersion = 3;
+  // v4: added mergeCrossDocumentDuplicateRoles — auto-merges substantive
+  // (non-stub) experience entries that confidently describe the same
+  // real-world role recorded twice across documents/chunks, which
+  // discardBareDuplicateExperience deliberately leaves alone.
+  static const int currentSanitizationVersion = 4;
 
   // ── Fallback keyword lists (used only when entryType/certType is missing) ──
 
@@ -397,6 +401,80 @@ class ResumeSanitizer {
 
   static String normalizeTitle(String s) => s.toLowerCase().trim();
 
+  /// If [short] (already lowercase) is the initialism of some contiguous
+  /// run of [words] — e.g. "us" over ["united","states","army"] matches
+  /// "united","states" — returns how many leading words that run consumed
+  /// (2, here). Returns null if no run matches. General acronym detection,
+  /// not a lookup of known organizations: applies equally to "US"/"United
+  /// States", "IBM"/"International Business Machines", "GE"/"General
+  /// Electric", etc.
+  static int? _initialismRunLength(String short, List<String> words) {
+    if (short.length < 2) return null;
+    final buffer = StringBuffer();
+    for (var end = 0; end < words.length; end++) {
+      final w = words[end];
+      if (w.isEmpty) continue;
+      buffer.write(w[0]);
+      if (buffer.length == short.length) {
+        return buffer.toString() == short ? end + 1 : null;
+      }
+    }
+    return null;
+  }
+
+  /// True if two (raw, un-normalized) organization names likely refer to
+  /// the same entity even though they aren't identical — an abbreviated vs.
+  /// spelled-out form ("US Army" / "United States Army"), or a shortened
+  /// vs. full legal suffix ("Acme Corp" / "Acme Corporation"). General
+  /// string-similarity heuristics: works for any user's employer names, not
+  /// a lookup table of specific organizations (military or otherwise).
+  static bool companiesAreLikelyTheSame(String rawA, String rawB) {
+    final a = normalizeCompany(rawA);
+    final b = normalizeCompany(rawB);
+    if (a.isEmpty || b.isEmpty) return false;
+    if (a == b) return true;
+
+    final wordsA = a.split(' ').where((w) => w.isNotEmpty).toList();
+    final wordsB = b.split(' ').where((w) => w.isNotEmpty).toList();
+    if (wordsA.isEmpty || wordsB.isEmpty) return false;
+
+    // Every token on the shorter side must line up with the longer side —
+    // either literally, as a prefix (abbreviated legal suffix: "corp" is a
+    // prefix of "corporation"), or as an initialism over a run of the
+    // longer side's words ("us" over "united","states").
+    final shorter = wordsA.length <= wordsB.length ? wordsA : wordsB;
+    final longer = wordsA.length <= wordsB.length ? wordsB : wordsA;
+    if (shorter.length / longer.length < 0.34) {
+      // Too lopsided to be a confident match (e.g. a single generic word
+      // against a five-word name) — avoids false positives like "acme"
+      // alone matching "acme regional medical center management group".
+      return false;
+    }
+
+    var consumedThroughLonger = 0;
+    for (final token in shorter) {
+      var matched = false;
+      for (var i = consumedThroughLonger; i < longer.length; i++) {
+        if (longer[i] == token ||
+            longer[i].startsWith(token) ||
+            token.startsWith(longer[i])) {
+          matched = true;
+          consumedThroughLonger = i + 1;
+          break;
+        }
+      }
+      if (matched) continue;
+      final runLength = _initialismRunLength(
+          token, longer.sublist(consumedThroughLonger));
+      if (runLength != null) {
+        matched = true;
+        consumedThroughLonger += runLength;
+      }
+      if (!matched) return false;
+    }
+    return true;
+  }
+
   // ── Date range overlap ───────────────────────────────────────────────────
 
   static int? extractYear(String? s) {
@@ -486,9 +564,9 @@ class ResumeSanitizer {
     Map<String, dynamic> a,
     Map<String, dynamic> b,
   ) {
-    final companyA = normalizeCompany(a['company'] as String? ?? '');
-    final companyB = normalizeCompany(b['company'] as String? ?? '');
-    if (companyA.isEmpty || companyA != companyB) return false;
+    final rawCompanyA = a['company'] as String? ?? '';
+    final rawCompanyB = b['company'] as String? ?? '';
+    if (!companiesAreLikelyTheSame(rawCompanyA, rawCompanyB)) return false;
 
     final titleA = normalizeTitle(a['title'] as String? ?? '');
     final titleB = normalizeTitle(b['title'] as String? ?? '');
@@ -529,6 +607,148 @@ class ResumeSanitizer {
       }
     }
     return false;
+  }
+
+  /// True for the HIGH-confidence half of [isLikelyCrossDocumentDuplicateRole]
+  /// only — same fuzzy-matched company, same normalized title, and a real
+  /// date-range overlap (not just "one side has an incomplete date", which
+  /// is too weak a signal to act on automatically; see that function's
+  /// "incomplete-date fallback" comment). This is the bar for automatically
+  /// merging two entries rather than merely flagging them for the user to
+  /// review via [hasCrossDocumentDuplicateRoles].
+  static bool _isConfidentCrossDocumentDuplicateRole(
+    Map<String, dynamic> a,
+    Map<String, dynamic> b,
+  ) {
+    if (!companiesAreLikelyTheSame(
+        a['company'] as String? ?? '', b['company'] as String? ?? '')) {
+      return false;
+    }
+    final titleA = normalizeTitle(a['title'] as String? ?? '');
+    final titleB = normalizeTitle(b['title'] as String? ?? '');
+    if (titleA.isEmpty || titleA != titleB) return false;
+
+    return dateRangesOverlap(
+      a['startDate'] as String? ?? '',
+      a['endDate'] as String?,
+      a['isCurrent'] as bool? ?? false,
+      b['startDate'] as String? ?? '',
+      b['endDate'] as String?,
+      b['isCurrent'] as bool? ?? false,
+    );
+  }
+
+  static String _normalizeBulletForDedup(String s) =>
+      s.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  /// Merges two SUBSTANTIVE (non-stub) experience entries believed to
+  /// describe the same real-world role — see
+  /// [_isConfidentCrossDocumentDuplicateRole] for the bar that triggers
+  /// this. Combines bullets from both (deduplicating near-identical ones —
+  /// same text after whitespace/case normalization), keeps the earliest
+  /// start date, and keeps the latest end date (or "current", if either
+  /// side is marked current — an ongoing role recorded from an older
+  /// document is still ongoing). Prefers the more detailed side's title/
+  /// company/location text as the surviving entry's identity fields.
+  static Map<String, dynamic> _mergeTwoRoles(
+    Map<String, dynamic> a,
+    Map<String, dynamic> b,
+  ) {
+    final aBullets = (a['bullets'] as List<dynamic>? ?? [])
+        .map((e) => e.toString())
+        .toList();
+    final bBullets = (b['bullets'] as List<dynamic>? ?? [])
+        .map((e) => e.toString())
+        .toList();
+
+    final seen = <String>{};
+    final mergedBullets = <String>[];
+    for (final bullet in [...aBullets, ...bBullets]) {
+      final key = _normalizeBulletForDedup(bullet);
+      if (key.isEmpty || !seen.add(key)) continue;
+      mergedBullets.add(bullet);
+    }
+
+    // Whichever side has more bullets is treated as the more complete
+    // record and donates its identity fields (title casing, company
+    // formatting, location) to the merged entry.
+    final primary = aBullets.length >= bBullets.length ? a : b;
+    final secondary = identical(primary, a) ? b : a;
+
+    final startA = extractYear(a['startDate'] as String?);
+    final startB = extractYear(b['startDate'] as String?);
+    final earlierStartEntry =
+        (startA != null && (startB == null || startA <= startB)) ? a : b;
+
+    final currentA = a['isCurrent'] as bool? ?? false;
+    final currentB = b['isCurrent'] as bool? ?? false;
+    final isCurrent = currentA || currentB;
+
+    String? mergedEndDate;
+    if (!isCurrent) {
+      final endA = extractYear(a['endDate'] as String?);
+      final endB = extractYear(b['endDate'] as String?);
+      if (endA == null) {
+        mergedEndDate = b['endDate'] as String?;
+      } else if (endB == null) {
+        mergedEndDate = a['endDate'] as String?;
+      } else {
+        mergedEndDate =
+            endA >= endB ? a['endDate'] as String? : b['endDate'] as String?;
+      }
+    }
+
+    return <String, dynamic>{
+      ...primary,
+      'title': primary['title'],
+      'company': primary['company'],
+      'location': (primary['location'] as String? ?? '').isNotEmpty
+          ? primary['location']
+          : secondary['location'],
+      'startDate': earlierStartEntry['startDate'],
+      'endDate': mergedEndDate,
+      'isCurrent': isCurrent,
+      'bullets': mergedBullets,
+    };
+  }
+
+  /// Extends [discardBareDuplicateExperience]'s bare-stub dedup to the
+  /// substantive-vs-substantive case: two entries that both have real
+  /// content (bullets, not just a title) but describe the same real-world
+  /// role, recorded twice — typically because they were extracted from
+  /// different documents or different sections/chunks of the same
+  /// document. Only merges pairs meeting
+  /// [_isConfidentCrossDocumentDuplicateRole]'s bar (fuzzy company match +
+  /// same title + genuine date-range overlap) — a weaker signal (e.g. one
+  /// side has only an incomplete date) is left alone and still surfaces via
+  /// [hasCrossDocumentDuplicateRoles] for the user to review manually,
+  /// rather than risk silently merging two entries that turn out to be
+  /// genuinely different assignments.
+  static List<dynamic> mergeCrossDocumentDuplicateRoles(
+      List<dynamic> entries) {
+    if (entries.length < 2) return entries;
+
+    final remaining = entries.map((e) => e as Map<String, dynamic>).toList();
+    final result = <Map<String, dynamic>>[];
+
+    while (remaining.isNotEmpty) {
+      var merged = remaining.removeAt(0);
+      var mergedAny = true;
+      while (mergedAny) {
+        mergedAny = false;
+        for (var i = 0; i < remaining.length; i++) {
+          if (_isConfidentCrossDocumentDuplicateRole(merged, remaining[i])) {
+            merged = _mergeTwoRoles(merged, remaining[i]);
+            remaining.removeAt(i);
+            mergedAny = true;
+            break;
+          }
+        }
+      }
+      result.add(merged);
+    }
+
+    return result;
   }
 
   // ── Cross-section duplicate: same event as both a cert and a job ────────

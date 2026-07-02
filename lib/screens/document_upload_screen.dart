@@ -928,6 +928,17 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
         hasDuplicates = false;
       } else {
         mergedList = sources.expand((s) => s.entries).toList();
+        if (field == 'experience') {
+          // Auto-merge substantive entries that confidently describe the
+          // same real-world role across documents/chunks (same fuzzy-
+          // matched company + title + a genuine date-range overlap) — see
+          // ResumeSanitizer.mergeCrossDocumentDuplicateRoles. A weaker
+          // signal (e.g. one side has only an incomplete date) is left
+          // alone and still flagged below for manual review, rather than
+          // risk silently merging two genuinely different assignments.
+          mergedList =
+              ResumeSanitizer.mergeCrossDocumentDuplicateRoles(mergedList);
+        }
         hasDuplicates = _hasPossibleDuplicates(field, mergedList);
       }
 

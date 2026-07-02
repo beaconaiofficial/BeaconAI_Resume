@@ -56,6 +56,13 @@ class _CreateTailoredResumeScreenState
   String? _masterResumeId;
   String _generatingMessage = 'Analyzing job requirements...';
 
+  // Call 1's (relevance scoring) result, cached so a retry after a Call
+  // 2-specific failure re-invokes only Call 2 rather than re-scoring
+  // relevance (and re-billing Haiku) from scratch. Invalidated whenever
+  // _jobPostingData changes, since a cached score set is only valid for the
+  // job posting it was scored against.
+  List<ExperienceEntry>? _cachedTop3Entries;
+
   // Cover letter upsell state
   bool _addCoverLetter = false;
   StoreProduct? _addOnProduct;
@@ -207,6 +214,9 @@ class _CreateTailoredResumeScreenState
       final data = await Phase2ApiService.extractJobPosting(text);
       setState(() {
         _jobPostingData = data;
+        // A cached Call 1 result only applies to the job posting it was
+        // scored against — a new/re-extracted posting invalidates it.
+        _cachedTop3Entries = null;
         _step = _TailoredStep.confirmation;
         _isLoading = false;
       });
@@ -239,6 +249,8 @@ class _CreateTailoredResumeScreenState
       final json = await Phase2ApiService.generateTailoredResume(
         masterData: _masterData!,
         jobPosting: _jobPostingData!,
+        cachedTop3: _cachedTop3Entries,
+        onEntriesSelected: (entries) => _cachedTop3Entries = entries,
         onProgress: (msg) {
           if (mounted) setState(() => _generatingMessage = msg);
         },
@@ -270,8 +282,16 @@ class _CreateTailoredResumeScreenState
 
     setState(() => _isLoading = true);
 
+    // Tracked so the catch block can clean up whatever was already written
+    // before a failure, rather than leaving an orphaned Resume/SourceDocument
+    // record with no (or partial) sections for the user to stumble into
+    // later from Home/My Documents.
+    String? createdResumeId;
+    String? createdDocId;
+
     try {
       final resumeId = _uuid.v4();
+      createdResumeId = resumeId;
       final now = DateTime.now();
 
       // Create Resume object
@@ -297,6 +317,7 @@ class _CreateTailoredResumeScreenState
 
       // Save job posting as a SourceDocument
       final docId = _uuid.v4();
+      createdDocId = docId;
       final doc = SourceDocument(
         id: docId,
         resumeId: resumeId,
@@ -309,7 +330,9 @@ class _CreateTailoredResumeScreenState
       );
       await HiveService.sourceDocumentBox.put(docId, doc);
 
-      // Write tailored sections to Hive
+      // Write tailored sections to Hive. Throws on malformed JSON — see
+      // _writeTailoredSections' doc comment for why there is deliberately
+      // no silent fallback here anymore.
       await _writeTailoredSections(resumeId, _tailoredResumeJson!);
 
       // Increment usage counter for Basic tier
@@ -338,6 +361,20 @@ class _CreateTailoredResumeScreenState
         }
       }
     } catch (e) {
+      debugPrint('[TAILORED_SAVE] Failed to save tailored resume: $e');
+      if (createdResumeId != null) {
+        await HiveService.resumeBox.delete(createdResumeId);
+        for (final type in SectionTypeEnum.values) {
+          await HiveService.resumeSectionBox
+              .delete('${createdResumeId}_${type.name}');
+        }
+        debugPrint(
+            '[TAILORED_SAVE] Cleaned up orphaned resume $createdResumeId');
+      }
+      if (createdDocId != null) {
+        await HiveService.sourceDocumentBox.delete(createdDocId);
+      }
+      if (!mounted) return;
       setState(() {
         _isLoading = false;
         _errorMessage = 'Failed to save. Please try again.';
@@ -345,96 +382,79 @@ class _CreateTailoredResumeScreenState
     }
   }
 
+  /// Writes each tailored section to Hive. Throws on malformed JSON rather
+  /// than silently falling back to copying the master resume's sections —
+  /// that fallback used to exist here and is exactly what caused the P0
+  /// "tailored resume identical to master" bug: a Call 2 response that
+  /// failed to parse would silently reach this function still unparseable,
+  /// and the old catch-all quietly copied master's content onto the new
+  /// tailored resume's id with no visible error. _onSave's catch block now
+  /// cleans up the partially-created Resume/SourceDocument records and
+  /// shows a real error instead.
   Future<void> _writeTailoredSections(
       String resumeId, String tailoredJson) async {
-    try {
-      final data = jsonDecode(tailoredJson) as Map<String, dynamic>;
+    final data = jsonDecode(tailoredJson) as Map<String, dynamic>;
 
-      Future<void> put(SectionTypeEnum type, String jsonData) async {
-        final key = '${resumeId}_${type.name}';
-        await HiveService.resumeSectionBox.put(
-          key,
-          ResumeSection(
-            id: _uuid.v4(),
-            resumeId: resumeId,
-            type: type,
-            data: jsonData,
-            hasUnreviewedAIContent: true,
-          ),
-        );
-      }
-
-      if (data['contact'] != null) {
-        await put(SectionTypeEnum.contact, jsonEncode(data['contact']));
-      }
-      if (data['summary'] != null) {
-        await put(
-            SectionTypeEnum.summary, jsonEncode({'text': data['summary']}));
-      }
-      if (data['experience'] != null) {
-        final exp = (data['experience'] as List).map((e) {
-          final m = Map<String, dynamic>.from(e as Map);
-          if (m['id'] == null || m['id'] == 'uuid-placeholder') {
-            m['id'] = _uuid.v4();
-          }
-          return m;
-        }).toList();
-        await put(SectionTypeEnum.experience, jsonEncode(exp));
-      }
-      if (data['education'] != null) {
-        final edu = (data['education'] as List).map((e) {
-          final m = Map<String, dynamic>.from(e as Map);
-          if (m['id'] == null || m['id'] == 'uuid-placeholder') {
-            m['id'] = _uuid.v4();
-          }
-          return m;
-        }).toList();
-        await put(SectionTypeEnum.education, jsonEncode(edu));
-      }
-      if (data['skills'] != null) {
-        final skills = (data['skills'] as List).map((e) {
-          final m = Map<String, dynamic>.from(e as Map);
-          if (m['id'] == null || m['id'] == 'uuid-placeholder') {
-            m['id'] = _uuid.v4();
-          }
-          return m;
-        }).toList();
-        await put(SectionTypeEnum.skills, jsonEncode(skills));
-      }
-      if (data['certifications'] != null) {
-        final certs = (data['certifications'] as List).map((e) {
-          final m = Map<String, dynamic>.from(e as Map);
-          if (m['id'] == null || m['id'] == 'uuid-placeholder') {
-            m['id'] = _uuid.v4();
-          }
-          return m;
-        }).toList();
-        await put(SectionTypeEnum.certifications, jsonEncode(certs));
-      }
-    } catch (_) {
-      // Copy master sections as fallback if JSON parsing fails
-      await _copyMasterSections(resumeId);
+    Future<void> put(SectionTypeEnum type, String jsonData) async {
+      final key = '${resumeId}_${type.name}';
+      await HiveService.resumeSectionBox.put(
+        key,
+        ResumeSection(
+          id: _uuid.v4(),
+          resumeId: resumeId,
+          type: type,
+          data: jsonData,
+          hasUnreviewedAIContent: true,
+        ),
+      );
     }
-  }
 
-  Future<void> _copyMasterSections(String tailoredResumeId) async {
-    if (_masterResumeId == null) return;
-    for (final type in SectionTypeEnum.values) {
-      final masterKey = '${_masterResumeId}_${type.name}';
-      final masterSection = HiveService.resumeSectionBox.get(masterKey);
-      if (masterSection != null) {
-        final tailoredKey = '${tailoredResumeId}_${type.name}';
-        await HiveService.resumeSectionBox.put(
-          tailoredKey,
-          ResumeSection(
-            id: _uuid.v4(),
-            resumeId: tailoredResumeId,
-            type: type,
-            data: masterSection.data,
-            hasUnreviewedAIContent: false,
-          ),
-        );
-      }
+    if (data['contact'] != null) {
+      await put(SectionTypeEnum.contact, jsonEncode(data['contact']));
+    }
+    if (data['summary'] != null) {
+      await put(
+          SectionTypeEnum.summary, jsonEncode({'text': data['summary']}));
+    }
+    if (data['experience'] != null) {
+      final exp = (data['experience'] as List).map((e) {
+        final m = Map<String, dynamic>.from(e as Map);
+        if (m['id'] == null || m['id'] == 'uuid-placeholder') {
+          m['id'] = _uuid.v4();
+        }
+        return m;
+      }).toList();
+      await put(SectionTypeEnum.experience, jsonEncode(exp));
+    }
+    if (data['education'] != null) {
+      final edu = (data['education'] as List).map((e) {
+        final m = Map<String, dynamic>.from(e as Map);
+        if (m['id'] == null || m['id'] == 'uuid-placeholder') {
+          m['id'] = _uuid.v4();
+        }
+        return m;
+      }).toList();
+      await put(SectionTypeEnum.education, jsonEncode(edu));
+    }
+    if (data['skills'] != null) {
+      final skills = (data['skills'] as List).map((e) {
+        final m = Map<String, dynamic>.from(e as Map);
+        if (m['id'] == null || m['id'] == 'uuid-placeholder') {
+          m['id'] = _uuid.v4();
+        }
+        return m;
+      }).toList();
+      await put(SectionTypeEnum.skills, jsonEncode(skills));
+    }
+    if (data['certifications'] != null) {
+      final certs = (data['certifications'] as List).map((e) {
+        final m = Map<String, dynamic>.from(e as Map);
+        if (m['id'] == null || m['id'] == 'uuid-placeholder') {
+          m['id'] = _uuid.v4();
+        }
+        return m;
+      }).toList();
+      await put(SectionTypeEnum.certifications, jsonEncode(certs));
     }
   }
 

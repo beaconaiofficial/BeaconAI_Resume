@@ -163,6 +163,183 @@ void main() {
     });
   });
 
+  group('companiesAreLikelyTheSame (general fuzzy org-name matching)', () {
+    test('acronym vs. spelled-out form matches — "US Army" / "United '
+        'States Army"', () {
+      expect(
+        ResumeSanitizer.companiesAreLikelyTheSame(
+            'US Army', 'United States Army'),
+        isTrue,
+      );
+    });
+
+    test('abbreviated vs. full legal suffix matches — "Acme Corp" / "Acme '
+        'Corporation" (proves this isn\'t military-specific)', () {
+      expect(
+        ResumeSanitizer.companiesAreLikelyTheSame(
+            'Acme Corp', 'Acme Corporation'),
+        isTrue,
+      );
+    });
+
+    test('genuinely different companies do not match', () {
+      expect(
+        ResumeSanitizer.companiesAreLikelyTheSame(
+            'Acme Corp', 'Zenith Industries'),
+        isFalse,
+      );
+    });
+  });
+
+  group('mergeCrossDocumentDuplicateRoles (FIX D — auto-merge, not just flag)',
+      () {
+    test('same title, near-duplicate company via acronym, overlapping '
+        'open-ended dates — the exact shape from the real log — merges '
+        'into one entry with bullets from both', () {
+      final entries = [
+        {
+          'title': 'Nodal Network Systems Operator-Maintainer',
+          'company': 'US Army',
+          'startDate': '2019-09-26',
+          'endDate': null,
+          'isCurrent': true,
+          'bullets': ['Maintained nodal network switching systems'],
+        },
+        {
+          'title': 'Nodal Network Systems Operator-Maintainer',
+          'company': 'United States Army',
+          'startDate': '16-MAR-2018',
+          'endDate': null,
+          'isCurrent': true,
+          'bullets': ['Operated tactical communications equipment'],
+        },
+      ];
+
+      final result = ResumeSanitizer.mergeCrossDocumentDuplicateRoles(entries);
+
+      expect(result.length, 1,
+          reason: 'both entries describe the same real-world role and must '
+              'collapse into one, not survive as two separate resume '
+              'entries');
+      final merged = result.first as Map<String, dynamic>;
+      expect(merged['startDate'], '16-MAR-2018',
+          reason: 'the earlier start date wins');
+      expect(merged['isCurrent'], isTrue);
+      expect(
+        merged['bullets'],
+        containsAll([
+          'Maintained nodal network switching systems',
+          'Operated tactical communications equipment',
+        ]),
+        reason: 'bullets from both source entries must survive the merge',
+      );
+    });
+
+    test('same title, same company, genuinely non-overlapping dates — two '
+        'distinct roles at different times — are NOT merged', () {
+      final entries = [
+        {
+          'title': 'Sales Associate',
+          'company': 'Meridian Retail Group',
+          'startDate': '2015',
+          'endDate': '2017',
+          'isCurrent': false,
+          'bullets': ['Worked the electronics department'],
+        },
+        {
+          'title': 'Sales Associate',
+          'company': 'Meridian Retail Group',
+          'startDate': '2021',
+          'endDate': '2023',
+          'isCurrent': false,
+          'bullets': ['Rehired seasonally for the home goods department'],
+        },
+      ];
+
+      final result = ResumeSanitizer.mergeCrossDocumentDuplicateRoles(entries);
+
+      expect(result.length, 2,
+          reason: 'two genuinely distinct stints at different times must '
+              'never be collapsed into one — a legitimate re-hire sequence, '
+              'not a duplicate');
+    });
+
+    test('non-military fixture: "Acme Corp" vs "Acme Corporation" with an '
+        'overlapping role merges — proves the fuzzy company matching isn\'t '
+        'accidentally military-specific', () {
+      final entries = [
+        {
+          'title': 'Operations Manager',
+          'company': 'Acme Corp',
+          'startDate': '2019',
+          'endDate': '2022',
+          'isCurrent': false,
+          'bullets': ['Oversaw daily warehouse operations'],
+        },
+        {
+          'title': 'Operations Manager',
+          'company': 'Acme Corporation',
+          'startDate': '2020',
+          'endDate': '2023',
+          'isCurrent': false,
+          'bullets': ['Managed a team of 12 warehouse staff'],
+        },
+      ];
+
+      final result = ResumeSanitizer.mergeCrossDocumentDuplicateRoles(entries);
+
+      expect(result.length, 1);
+      final merged = result.first as Map<String, dynamic>;
+      expect(merged['startDate'], '2019');
+      expect(merged['endDate'], '2023');
+      expect(
+        merged['bullets'],
+        containsAll([
+          'Oversaw daily warehouse operations',
+          'Managed a team of 12 warehouse staff',
+        ]),
+      );
+    });
+
+    test('an incomplete-date-only match (the weaker signal) is left alone '
+        'for manual review rather than auto-merged', () {
+      // Same company + title, but neither a real date overlap nor an
+      // incomplete-date fallback trigger here — both sides are fully dated
+      // and genuinely don't overlap, so this must NOT merge (covered above)
+      // — this test instead confirms a single incomplete-date-only pair
+      // still passes through mergeCrossDocumentDuplicateRoles unmerged,
+      // since _isConfidentCrossDocumentDuplicateRole requires a real
+      // overlap, not just "one side is missing an end date".
+      final entries = [
+        {
+          'title': 'Project Coordinator',
+          'company': 'Whitfield Consulting',
+          'startDate': '2016',
+          'endDate': null,
+          'isCurrent': false,
+          'bullets': ['Coordinated cross-team deliverables'],
+        },
+        {
+          'title': 'Project Coordinator',
+          'company': 'Whitfield Consulting',
+          'startDate': '2019',
+          'endDate': '2021',
+          'isCurrent': false,
+          'bullets': ['Managed vendor relationships'],
+        },
+      ];
+
+      final result = ResumeSanitizer.mergeCrossDocumentDuplicateRoles(entries);
+
+      expect(result.length, 2,
+          reason: 'an incomplete date alone is not confident enough to '
+              'auto-merge — this pair should still be surfaced via '
+              'hasCrossDocumentDuplicateRoles for the user to decide, not '
+              'silently combined');
+      expect(ResumeSanitizer.hasCrossDocumentDuplicateRoles(entries), isTrue);
+    });
+  });
+
   group('GAP 2 — structured certType filtering (tailored-resume generation)', () {
     test('classifyCertType trusts an explicit, valid certType', () {
       expect(
