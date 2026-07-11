@@ -14,6 +14,7 @@ import '../providers/user_settings_provider.dart';
 import '../services/hive_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/ai_suggestions_panel.dart';
+import '../widgets/bottom_bar_icon_button.dart';
 import '../widgets/resume_template_renderer.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -967,12 +968,13 @@ class _BottomActionBar extends StatelessWidget {
         children: [
           // Edit toggle
           Expanded(
-            child: _BarButton(
+            child: BottomBarIconButton(
               icon: editMode ? Icons.check_circle_outline : Icons.edit_outlined,
               label: editMode ? 'Done Editing' : 'Edit',
-              color: editMode
+              foregroundColor: editMode
                   ? (isDark ? AppColors.successDark : AppColors.successLight)
                   : accent,
+              borderColor: Theme.of(context).colorScheme.outlineVariant,
               onTap: onToggleEdit,
             ),
           ),
@@ -980,10 +982,11 @@ class _BottomActionBar extends StatelessWidget {
 
           // Template
           Expanded(
-            child: _BarButton(
+            child: BottomBarIconButton(
               icon: Icons.style_outlined,
               label: 'Template',
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
+              borderColor: Theme.of(context).colorScheme.outlineVariant,
               onTap: onChangeTemplate,
             ),
           ),
@@ -991,10 +994,11 @@ class _BottomActionBar extends StatelessWidget {
 
           // Print
           Expanded(
-            child: _BarButton(
+            child: BottomBarIconButton(
               icon: Icons.print_outlined,
               label: 'Print',
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
+              borderColor: Theme.of(context).colorScheme.outlineVariant,
               onTap: onPrint,
             ),
           ),
@@ -1002,84 +1006,15 @@ class _BottomActionBar extends StatelessWidget {
 
           // Export — primary CTA
           Expanded(
-            child: Semantics(
+            child: BottomBarIconButton(
+              icon: Icons.ios_share_outlined,
               label: 'Export',
-              button: true,
-              child: InkWell(
-                onTap: onExport,
-                borderRadius: BorderRadius.circular(8),
-                child: Container(
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: accent,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.ios_share_outlined,
-                          size: 18, color: Colors.white),
-                      const SizedBox(height: 2),
-                      Text(
-                        'Export',
-                        style: GoogleFonts.inter(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.white),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+              foregroundColor: Colors.white,
+              backgroundColor: accent,
+              onTap: onExport,
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _BarButton extends StatelessWidget {
-  const _BarButton({
-    required this.icon,
-    required this.label,
-    required this.color,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final Color color;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      label: label,
-      button: true,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          height: 48,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            border:
-                Border.all(color: Theme.of(context).colorScheme.outlineVariant),
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 18, color: color),
-              const SizedBox(height: 2),
-              Text(
-                label,
-                style: GoogleFonts.inter(
-                    fontSize: 10, fontWeight: FontWeight.w500, color: color),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }

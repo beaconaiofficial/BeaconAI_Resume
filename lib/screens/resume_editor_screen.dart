@@ -18,6 +18,8 @@ import '../providers/user_settings_provider.dart';
 import '../services/hive_service.dart';
 import '../services/pdf_export_service.dart';
 import '../theme/app_colors.dart';
+import '../utils/app_logger.dart';
+import '../widgets/bottom_bar_icon_button.dart';
 import '../widgets/pending_decision_card.dart';
 import '../widgets/resume_template_renderer.dart';
 import '../widgets/wizard_step_contact_summary.dart';
@@ -96,7 +98,7 @@ class _ResumeEditorScreenState extends ConsumerState<ResumeEditorScreen> {
       return;
     }
     _resume = HiveService.resumeBox.get(_resumeId);
-    debugPrint('[EDITOR] uploadCount on load: ${_resume?.uploadCount}');
+    devLog('[EDITOR] uploadCount on load: ${_resume?.uploadCount}');
     final data = ResumeRenderData.fromHive(_resumeId!);
     _contact = data.contact;
     _summary = data.summary;
@@ -1027,53 +1029,32 @@ class _ResumeEditorScreenState extends ConsumerState<ResumeEditorScreen> {
       child: Row(
         children: [
           Expanded(
-            child: _BarButton(
+            child: BottomBarIconButton(
               icon: Icons.style_outlined,
               label: 'Template',
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
+              borderColor: Theme.of(context).colorScheme.outlineVariant,
               onTap: _onChangeTemplate,
             ),
           ),
           const SizedBox(width: 8),
           Expanded(
-            child: _BarButton(
+            child: BottomBarIconButton(
               icon: Icons.print_outlined,
               label: 'Print',
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
+              borderColor: Theme.of(context).colorScheme.outlineVariant,
               onTap: _onPrint,
             ),
           ),
           const SizedBox(width: 8),
           Expanded(
-            child: Semantics(
+            child: BottomBarIconButton(
+              icon: Icons.ios_share_outlined,
               label: 'Export',
-              button: true,
-              child: InkWell(
-                onTap: _onExport,
-                borderRadius: BorderRadius.circular(8),
-                child: Container(
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: accent,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.ios_share_outlined,
-                          size: 18, color: Colors.white),
-                      const SizedBox(height: 2),
-                      Text(
-                        'Export',
-                        style: GoogleFonts.inter(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.white),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+              foregroundColor: Colors.white,
+              backgroundColor: accent,
+              onTap: _onExport,
             ),
           ),
         ],
@@ -1086,7 +1067,7 @@ class _ResumeEditorScreenState extends ConsumerState<ResumeEditorScreen> {
   Widget _buildSourceDocumentsSection(bool isDark) {
     final tier = ref.watch(currentTierProvider);
     final count = _resume?.uploadCount ?? 0;
-    debugPrint('[SOURCE DOCS SECTION] Displaying count: $count');
+    devLog('[SOURCE DOCS SECTION] Displaying count: $count');
     final subtitle = tier.uploadLimit == -1
         ? '($count uploaded)'
         : '($count / ${tier.uploadLimit})';
@@ -1298,6 +1279,16 @@ class EditorPreviewPaneState extends State<EditorPreviewPane>
   late final AnimationController _resetAnimController;
   bool _isZoomed = false;
 
+  // _pageCount() below is a heuristic guess (entry/cert counts), not a
+  // measurement — it can overshoot real content height (e.g. entries with
+  // few bullets each), which used to render genuinely blank trailing
+  // page-cards with nothing left to slice into them. _measureKey lets the
+  // real rendered height of the resume content be measured after the first
+  // frame, and _measuredPageCount overrides the heuristic once known — see
+  // _scheduleMeasurement.
+  final GlobalKey _measureKey = GlobalKey();
+  int? _measuredPageCount;
+
   @override
   void initState() {
     super.initState();
@@ -1306,6 +1297,34 @@ class EditorPreviewPaneState extends State<EditorPreviewPane>
       vsync: this,
       duration: const Duration(milliseconds: 220),
     );
+    _scheduleMeasurement();
+  }
+
+  @override
+  void didUpdateWidget(EditorPreviewPane oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Content changed (an edit was saved) — the old measurement no longer
+    // applies. Re-measure against the heuristic's estimate in the meantime
+    // so the preview isn't stuck on a stale page count.
+    if (oldWidget.renderData != widget.renderData) {
+      _measuredPageCount = null;
+      _scheduleMeasurement();
+    }
+  }
+
+  void _scheduleMeasurement() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final renderBox =
+          _measureKey.currentContext?.findRenderObject() as RenderBox?;
+      if (renderBox == null || !renderBox.hasSize) return;
+      final measured = (renderBox.size.height / kResumePageHeight)
+          .ceil()
+          .clamp(1, 8);
+      if (measured != _measuredPageCount) {
+        setState(() => _measuredPageCount = measured);
+      }
+    });
   }
 
   @override
@@ -1384,7 +1403,13 @@ class EditorPreviewPaneState extends State<EditorPreviewPane>
 
   @override
   Widget build(BuildContext context) {
-    final pageCount = _pageCount(widget.renderData);
+    // The measured height (once available) is authoritative — the heuristic
+    // is only a first-frame placeholder. See _scheduleMeasurement.
+    final pageCount = _measuredPageCount ?? _pageCount(widget.renderData);
+    // Every build's first page-card is a measurement candidate — re-arm
+    // the measurement for this frame's render (stale RenderBoxes from a
+    // previous frame are simply never queried again once superseded).
+    _scheduleMeasurement();
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -1416,6 +1441,7 @@ class EditorPreviewPaneState extends State<EditorPreviewPane>
                   top: -(i * kResumePageHeight),
                   left: 0,
                   child: SizedBox(
+                    key: i == 0 ? _measureKey : null,
                     width: kResumePageWidth,
                     child: ResumeTemplateRenderer(
                       resume: widget.resume,
@@ -1474,7 +1500,102 @@ class EditorPreviewPaneState extends State<EditorPreviewPane>
                   child: _ZoomResetPill(onTap: _resetZoom, isDark: widget.isDark),
                 ),
               ),
+            // Visual scroll-position indicator. InteractiveViewer's pan
+            // (not a Scrollable) is what actually navigates multi-page
+            // content here, and Flutter's built-in Scrollbar widget only
+            // attaches to a real Scrollable — it can't be used directly.
+            // This restores the visual affordance a Scrollbar would give
+            // (there's more content below/above, here's roughly where you
+            // are) without touching InteractiveViewer's own gesture
+            // handling, which already correctly supports panning to the
+            // true end of content.
+            Positioned(
+              right: 3,
+              top: 8,
+              bottom: 8,
+              child: _PreviewScrollIndicator(
+                transformController: _transformController,
+                viewportHeight: constraints.maxHeight - 16,
+                naturalContentHeight: pageCount * kResumePageHeight +
+                    (pageCount - 1) * 12,
+                fitWidthScale: availableWidth / kResumePageWidth,
+                isDark: widget.isDark,
+              ),
+            ),
           ],
+        );
+      },
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Passive scroll-position indicator for the pan/zoom preview — see the
+// comment at its call site for why this exists instead of a real Scrollbar.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _PreviewScrollIndicator extends StatelessWidget {
+  const _PreviewScrollIndicator({
+    required this.transformController,
+    required this.viewportHeight,
+    required this.naturalContentHeight,
+    required this.fitWidthScale,
+    required this.isDark,
+  });
+
+  final TransformationController transformController;
+  final double viewportHeight;
+  final double naturalContentHeight;
+  final double fitWidthScale;
+  final bool isDark;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: transformController,
+      builder: (context, _) {
+        final ivScale = transformController.value.getMaxScaleOnAxis();
+        final totalContentHeight =
+            naturalContentHeight * fitWidthScale * ivScale;
+
+        // Nothing to scroll — content already fits the viewport at the
+        // current zoom level. Matches a real Scrollbar's own behavior of
+        // staying hidden when there's nothing to indicate.
+        if (totalContentHeight <= viewportHeight + 0.5 ||
+            viewportHeight <= 0) {
+          return const SizedBox.shrink();
+        }
+
+        final translationY = transformController.value.getTranslation().y;
+        final maxScrollOffset = totalContentHeight - viewportHeight;
+        final scrollFraction =
+            (-translationY / maxScrollOffset).clamp(0.0, 1.0);
+
+        final thumbHeightFraction =
+            (viewportHeight / totalContentHeight).clamp(0.08, 1.0);
+        final thumbHeight = thumbHeightFraction * viewportHeight;
+        final thumbTop = scrollFraction * (viewportHeight - thumbHeight);
+
+        final color = isDark ? AppColors.borderDark : AppColors.borderLight;
+
+        return SizedBox(
+          width: 4,
+          height: viewportHeight,
+          child: Stack(
+            children: [
+              Positioned(
+                top: thumbTop,
+                child: Container(
+                  width: 4,
+                  height: thumbHeight,
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.7),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -1549,56 +1670,3 @@ class _ZoomResetPill extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Bottom bar button
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _BarButton extends StatelessWidget {
-  const _BarButton({
-    required this.icon,
-    required this.label,
-    required this.color,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final Color color;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      label: label,
-      button: true,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          height: 48,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: Theme.of(context).colorScheme.outlineVariant,
-            ),
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 18, color: color),
-              const SizedBox(height: 2),
-              Text(
-                label,
-                style: GoogleFonts.inter(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w500,
-                  color: color,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
