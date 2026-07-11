@@ -16,44 +16,41 @@ workflows:
       app_store_connect: "BeaconAI CodeMagic"
 
     environment:
-      vars:
-        BUNDLE_ID: "dev.getbeaconai.beaconai-resume"
+      # Named-reference signing, not the fetch-signing-files/App Store
+      # Connect API auto-create path this workflow used before. That
+      # script-based approach only ever talks to Apple's API directly — it
+      # has no way to see certificates manually created in Codemagic's own
+      # Code Signing Identities UI, which is a separate internal vault.
+      # Since the distribution certificate ("Resume_distro") was created
+      # there (the UI's own "Enter unique reference name to be used in
+      # codemagic.yaml" prompt is the documented signal for this), the only
+      # way to actually consume it is this named-reference block. Confirmed
+      # from current Codemagic docs: distribution_type/bundle_identifier
+      # and certificates/provisioning_profiles are mutually exclusive
+      # within ios_signing — cannot mix a named certificate with
+      # auto-fetched-by-bundle-ID profile lookup.
+      #
+      # provisioning_profiles below is a placeholder reference name —
+      # Steven still needs to create a matching App Store provisioning
+      # profile in the same Code Signing Identities UI (bound to
+      # Resume_distro / the dev.getbeaconai.beaconai-resume App ID) and
+      # give it this exact reference name, or update it here to whatever
+      # name he actually uses.
+      ios_signing:
+        certificates:
+          - Resume_distro
+        provisioning_profiles:
+          - Resume_distro_profile
       flutter: stable
       xcode: latest
       cocoapods: default
 
     scripts:
-      # Fully automatic signing via the App Store Connect API key — fetches
-      # (or creates, if none exist yet) the distribution certificate and an
-      # App Store provisioning profile for BUNDLE_ID directly through the
-      # API integration, with nothing manually uploaded to Codemagic's own
-      # Code Signing Identities UI beforehand.
-      #
-      # Deliberately NOT using an `ios_signing: distribution_type: ...`
-      # block instead — that declares Codemagic should look for signing
-      # files already uploaded to its UI, which is a different (manual)
-      # signing path. Declaring both at once is a documented cause of
-      # "No matching profiles found for bundle identifier ... and
-      # distribution type app_store", since the two approaches conflict.
-      #
-      # This still requires BUNDLE_ID to already be a registered App ID
-      # under Certificates, Identifiers & Profiles in the Apple Developer
-      # Portal — fetch-signing-files can create a new certificate/profile
-      # for an existing App ID, but does not register the App ID itself.
-      - name: Set up keychain to be used for code signing
-        script: |
-          keychain initialize
-
-      - name: Fetch signing files
-        script: |
-          app-store-connect fetch-signing-files "$BUNDLE_ID" \
-            --type IOS_APP_STORE \
-            --create
-
-      - name: Set up signing certificate
-        script: |
-          keychain add-certificates
-
+      # keychain initialize / fetch-signing-files / keychain add-certificates
+      # are not used with named ios_signing references — per Codemagic's
+      # docs, those are "automatically fetched during the build process"
+      # for this signing style. xcode-project use-profiles is still needed
+      # to apply the fetched certificate/profile to the Xcode project.
       - name: Set up code signing settings on Xcode project
         script: |
           xcode-project use-profiles
