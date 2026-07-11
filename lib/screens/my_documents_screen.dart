@@ -6,10 +6,58 @@ import 'package:printing/printing.dart';
 
 import '../constants/app_constants.dart';
 import '../models/resume.dart';
+import '../models/supporting_models.dart';
+import '../providers/cover_letter_provider.dart';
 import '../providers/resume_provider.dart';
+import '../services/hive_service.dart';
 import '../services/pdf_export_service.dart';
 import '../widgets/resume_template_renderer.dart';
 import '../theme/app_colors.dart';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _DocEntry — a Resume or a CoverLetter, unified into one list so both sort,
+// filter, and search alongside each other. Per the plan doc, My Documents is
+// meant to show resumes AND cover letters (and study guides, not yet wired
+// up — out of scope here) as one archive, not two disconnected sections.
+// A CoverLetter has no companyName/roleTitle of its own, so those are
+// resolved once (from its linked Resume, via resumeId) when the list is
+// built — this is exactly the association My Documents' company/role search
+// and sort already rely on for resumes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _DocEntry {
+  const _DocEntry.resume(Resume r)
+      : resume = r,
+        coverLetter = null,
+        _linkedCompany = null,
+        _linkedRole = null;
+
+  const _DocEntry.coverLetter(
+    CoverLetter c,
+    this._linkedCompany,
+    this._linkedRole,
+  )   : resume = null,
+        coverLetter = c;
+
+  final Resume? resume;
+  final CoverLetter? coverLetter;
+  final String? _linkedCompany;
+  final String? _linkedRole;
+
+  bool get isCoverLetter => coverLetter != null;
+  DateTime get updatedAt => resume?.updatedAt ?? coverLetter!.updatedAt;
+  // CoverLetter has no archive concept yet (Rule §2's "never delete" isn't
+  // wired up for it — out of scope here); it's never excluded by the
+  // archived toggle.
+  bool get isArchived => resume?.isArchived ?? false;
+  String get displayTitle =>
+      resume?.displayTitle ??
+      ((_linkedRole?.isNotEmpty ?? false)
+          ? 'Cover Letter — $_linkedRole'
+          : 'Cover Letter');
+  String? get companyName => resume?.companyName ?? _linkedCompany;
+  String? get roleTitleForSearch => resume?.roleTitle ?? _linkedRole;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MyDocumentsScreen
@@ -47,26 +95,52 @@ class _MyDocumentsScreenState extends ConsumerState<MyDocumentsScreen> {
 
   // ── Filtering & sorting ────────────────────────────────────────────────────
 
-  List<Resume> _applyFilters(List<Resume> all) {
-    var results = all.where((r) {
+  /// Resolves each cover letter's company/role via its linked resume
+  /// (resumeId) and wraps it alongside the resume list as one combined set
+  /// of entries — the same association used elsewhere (e.g. the tailored
+  /// resume it was generated from).
+  List<_DocEntry> _buildEntries(
+      List<Resume> resumes, List<CoverLetter> coverLetters) {
+    final resumesById = {for (final r in resumes) r.id: r};
+    return [
+      ...resumes.map(_DocEntry.resume),
+      ...coverLetters.map((c) {
+        final linked = resumesById[c.resumeId] ??
+            HiveService.resumeBox.get(c.resumeId);
+        return _DocEntry.coverLetter(
+            c, linked?.companyName, linked?.roleTitle);
+      }),
+    ];
+  }
+
+  List<_DocEntry> _applyFilters(List<_DocEntry> all) {
+    var results = all.where((e) {
       // Archived filter
-      if (!_showArchived && r.isArchived) return false;
+      if (!_showArchived && e.isArchived) return false;
 
       // Type filter
-      if (_filterType == DocFilterType.masterResume && !r.isMaster) {
+      if (_filterType == DocFilterType.masterResume &&
+          (e.resume == null || !e.resume!.isMaster)) {
         return false;
       }
       if (_filterType == DocFilterType.tailoredResume &&
-          (r.isMaster || r.isArchived)) {
+          (e.resume == null || e.resume!.isMaster || e.resume!.isArchived)) {
         return false;
       }
+      if (_filterType == DocFilterType.coverLetter && !e.isCoverLetter) {
+        return false;
+      }
+      // studyGuide: no backing data source yet — always empty, same as
+      // before this change (not a regression introduced here).
+      if (_filterType == DocFilterType.studyGuide) return false;
 
       // Search query
       if (_searchQuery.isNotEmpty) {
         final q = _searchQuery.toLowerCase();
-        final titleMatch = r.displayTitle.toLowerCase().contains(q);
-        final companyMatch = r.companyName?.toLowerCase().contains(q) ?? false;
-        final roleMatch = r.roleTitle?.toLowerCase().contains(q) ?? false;
+        final titleMatch = e.displayTitle.toLowerCase().contains(q);
+        final companyMatch = e.companyName?.toLowerCase().contains(q) ?? false;
+        final roleMatch =
+            e.roleTitleForSearch?.toLowerCase().contains(q) ?? false;
         if (!titleMatch && !companyMatch && !roleMatch) return false;
       }
 
@@ -80,8 +154,8 @@ class _MyDocumentsScreenState extends ConsumerState<MyDocumentsScreen> {
       case DocSortOrder.oldest:
         results.sort((a, b) => a.updatedAt.compareTo(b.updatedAt));
       case DocSortOrder.companyAZ:
-        results.sort((a, b) =>
-            (a.companyName ?? a.title).compareTo(b.companyName ?? b.title));
+        results.sort((a, b) => (a.companyName ?? a.displayTitle)
+            .compareTo(b.companyName ?? b.displayTitle));
     }
 
     return results;
@@ -199,8 +273,9 @@ class _MyDocumentsScreenState extends ConsumerState<MyDocumentsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final all = ref.watch(resumeListProvider);
-    final filtered = _applyFilters(all);
+    final resumes = ref.watch(resumeListProvider);
+    final coverLetters = ref.watch(coverLetterListProvider);
+    final filtered = _applyFilters(_buildEntries(resumes, coverLetters));
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Scaffold(
@@ -298,7 +373,26 @@ class _MyDocumentsScreenState extends ConsumerState<MyDocumentsScreen> {
                     padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
                     itemCount: filtered.length,
                     itemBuilder: (ctx, i) {
-                      final resume = filtered[i];
+                      final entry = filtered[i];
+                      if (entry.isCoverLetter) {
+                        final cl = entry.coverLetter!;
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: _CoverLetterRow(
+                            entry: entry,
+                            isDark: isDark,
+                            onTap: () => Navigator.pushNamed(
+                              ctx,
+                              AppConstants.routeCoverLetterBuilder,
+                              arguments: {
+                                'resumeId': cl.resumeId,
+                                'coverLetterId': cl.id,
+                              },
+                            ),
+                          ),
+                        );
+                      }
+                      final resume = entry.resume!;
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 10),
                         child: _DocumentRow(
@@ -606,6 +700,108 @@ class _DocumentRow extends StatelessWidget {
               ),
 
               // Chevron
+              Icon(
+                Icons.chevron_right,
+                size: 18,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cover letter row — mirrors _DocumentRow's visual style. No long-press menu
+// yet (rename/export/print/delete for cover letters is out of scope for the
+// "invisible in My Documents" fix — tap opens the builder screen, which
+// already supports editing, exporting, and printing).
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _CoverLetterRow extends StatelessWidget {
+  const _CoverLetterRow({
+    required this.entry,
+    required this.isDark,
+    required this.onTap,
+  });
+
+  final _DocEntry entry;
+  final bool isDark;
+  final VoidCallback onTap;
+
+  String _formatDate(DateTime dt) => DateFormat('MMM d, yyyy').format(dt);
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = isDark ? AppColors.accentDark : AppColors.accentLightColor;
+    final surface = isDark ? AppColors.surfaceDark : AppColors.surfaceLight;
+    final border = isDark ? AppColors.borderDark : AppColors.borderLight;
+
+    return Semantics(
+      label: '${entry.displayTitle}, Cover Letter, '
+          'last edited ${_formatDate(entry.updatedAt)}.',
+      button: true,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: surface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: border),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                child: Icon(Icons.mail_outline, size: 18, color: accent),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      entry.displayTitle,
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 3),
+                    Row(
+                      children: [
+                        _TypeBadge(
+                          label: 'Cover Letter',
+                          isArchived: false,
+                          isDark: isDark,
+                          accent: accent,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _formatDate(entry.updatedAt),
+                          style: GoogleFonts.jetBrainsMono(
+                            fontSize: 10,
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
               Icon(
                 Icons.chevron_right,
                 size: 18,

@@ -6,6 +6,8 @@ import 'package:intl/intl.dart';
 import '../constants/app_constants.dart';
 import '../models/app_enums.dart';
 import '../models/resume.dart';
+import '../models/supporting_models.dart';
+import '../providers/cover_letter_provider.dart';
 import '../providers/resume_provider.dart';
 import '../providers/user_settings_provider.dart';
 import '../providers/connectivity_provider.dart';
@@ -136,6 +138,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final settings = ref.watch(userSettingsProvider);
     final master = ref.watch(activeMasterResumeProvider);
     final tailored = ref.watch(activeTailoredResumesProvider);
+    final coverLetters = ref.watch(coverLetterListProvider);
     final tier = ref.watch(currentTierProvider);
     final isOnline = ref.watch(isOnlineProvider);
     final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -266,6 +269,41 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                   ),
                 ),
               ),
+
+            // ── Cover letters section ─────────────────────────────────────
+            // Home is meant to surface everything generated, per the plan
+            // doc — cover letters previously had no presence here at all.
+            // No empty-state card: unlike tailored resumes, there's no
+            // "create" entry point from Home, so an empty list just means
+            // nothing to show yet.
+            if (coverLetters.isNotEmpty) ...[
+              const SliverToBoxAdapter(
+                child: _SectionHeader(label: 'Cover Letters'),
+              ),
+              SliverPadding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                sliver: SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (context, i) => Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: _CoverLetterCard(
+                        coverLetter: coverLetters[i],
+                        isDark: isDark,
+                        onTap: () => Navigator.pushNamed(
+                          context,
+                          AppConstants.routeCoverLetterBuilder,
+                          arguments: {
+                            'resumeId': coverLetters[i].resumeId,
+                            'coverLetterId': coverLetters[i].id,
+                          },
+                        ),
+                      ),
+                    ),
+                    childCount: coverLetters.length,
+                  ),
+                ),
+              ),
+            ],
 
             const SliverToBoxAdapter(child: SizedBox(height: 100)),
           ],
@@ -627,6 +665,107 @@ class _ResumeCard extends ConsumerWidget {
     if (diff.inDays == 1) return 'yesterday';
     if (diff.inDays < 7) return '${diff.inDays} days ago';
     return DateFormat('MMM d, yyyy').format(dt);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cover Letter Card — same visual language as _ResumeCard, no ATS score
+// (that concept doesn't apply to cover letters).
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _CoverLetterCard extends ConsumerWidget {
+  const _CoverLetterCard({
+    required this.coverLetter,
+    required this.isDark,
+    required this.onTap,
+  });
+
+  final CoverLetter coverLetter;
+  final bool isDark;
+  final VoidCallback onTap;
+
+  String _formatDate(DateTime dt) {
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff.inDays == 0) return 'today';
+    if (diff.inDays == 1) return 'yesterday';
+    if (diff.inDays < 7) return '${diff.inDays} days ago';
+    return DateFormat('MMM d, yyyy').format(dt);
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final accent = isDark ? AppColors.accentDark : AppColors.accentLightColor;
+    final surface = isDark ? AppColors.surfaceDark : AppColors.surfaceLight;
+    final border = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final linkedResume = HiveService.resumeBox.get(coverLetter.resumeId);
+    final title = (linkedResume?.roleTitle?.isNotEmpty ?? false)
+        ? 'Cover Letter — ${linkedResume!.roleTitle}'
+        : 'Cover Letter';
+    final updatedLabel = _formatDate(coverLetter.updatedAt);
+
+    return Semantics(
+      label: '$title, last edited $updatedLabel',
+      button: true,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          decoration: BoxDecoration(
+            color: surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: border),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: accent.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(Icons.mail_outline, size: 20, color: accent),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Updated $updatedLabel',
+                        style: GoogleFonts.inter(
+                          fontSize: 12,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  Icons.chevron_right,
+                  size: 18,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

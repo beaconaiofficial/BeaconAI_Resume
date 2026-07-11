@@ -99,10 +99,41 @@ final activeTailoredResumesProvider = Provider<List<Resume>>((ref) {
 // ATS Score Provider
 // Computes a simple section-completeness ATS score (0–100) for a resume.
 // Phase 1: completeness only. Phase 3: keyword density added.
+//
+// _computeAtsScore reads resumeSectionBox, a DIFFERENT Hive box than the one
+// resumeListProvider watches (resumeBox). Both the tailored-resume save flow
+// (create_tailored_resume_screen.dart) and the master-resume wizard
+// (resume_builder_wizard_screen.dart) write the Resume record to resumeBox
+// FIRST, then write its sections to resumeSectionBox in a second, separate
+// step — so watching only resumeListProvider means this provider recomputes
+// (and gets cached) at the moment triggered by the Resume-record write,
+// which is BEFORE any section exists yet, producing a score of 0 that then
+// never updates once the sections actually land seconds later, because
+// nothing this provider watches changed again. _resumeSectionBoxVersion
+// closes that gap.
 // ─────────────────────────────────────────────────────────────────────────────
+
+class _ResumeSectionBoxVersionNotifier extends Notifier<int> {
+  @override
+  int build() {
+    final box = HiveService.resumeSectionBox;
+    final listenable = box.listenable();
+    listenable.addListener(_onChanged);
+    ref.onDispose(() => listenable.removeListener(_onChanged));
+    return 0;
+  }
+
+  void _onChanged() => state++;
+}
+
+final _resumeSectionBoxVersionProvider =
+    NotifierProvider<_ResumeSectionBoxVersionNotifier, int>(
+  _ResumeSectionBoxVersionNotifier.new,
+);
 
 final atsScoreProvider = Provider.family<int, String>((ref, resumeId) {
   ref.watch(resumeListProvider); // rebuild when resumes change
+  ref.watch(_resumeSectionBoxVersionProvider); // rebuild when sections change
   return _computeAtsScore(resumeId);
 });
 
