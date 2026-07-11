@@ -11,12 +11,9 @@ workflows:
     # block later if/when that's actually wanted.
 
     integrations:
-      # This name must exactly match whatever you name the App Store
-      # Connect API key integration you add in Codemagic's Team
+      # Must exactly match the integration name in Codemagic's Team
       # integrations settings (Teams > Integrations > App Store Connect).
-      # "app_store_connect" is just this workflow's chosen name for it —
-      # rename either side so they match.
-      app_store_connect: app_store_connect
+      app_store_connect: "BeaconAI CodeMagic"
 
     environment:
       vars:
