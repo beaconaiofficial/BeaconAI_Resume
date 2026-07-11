@@ -426,7 +426,16 @@ class WizardNavBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+      padding: EdgeInsets.fromLTRB(
+        24,
+        12,
+        24,
+        // Base 24 preserves the existing look on devices with no reserved
+        // bottom inset; the device's own inset (3-button nav bar, gesture
+        // home indicator, etc.) is added on top so buttons never render
+        // underneath the system navigation area.
+        24 + MediaQuery.of(context).padding.bottom,
+      ),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
         border: Border(
@@ -437,41 +446,107 @@ class WizardNavBar extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // Back
+          // Back — only takes up space when it's actually shown. Step 1 has
+          // no prior step, so nothing reserves its place: an invisible
+          // fixed-width placeholder here was stealing width the two Save
+          // buttons needed, forcing them into much more aggressive ellipsis
+          // than the flex ratios alone would predict. A few pixels of
+          // horizontal shift between "no Back" and "Back present" steps is
+          // a fair trade for a legible primary action.
           if (!_isFirstStep)
             OutlinedButton(
               onPressed: onBack,
-              child: const Text('Back'),
-            )
-          else
-            const SizedBox(width: 80),
-
-          // Save & Exit — always available
-          const Spacer(),
-          TextButton(
-            onPressed: onSaveExit,
-            child: Text(
-              'Save & Exit',
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
               ),
+              child: const Text('Back'),
             ),
-          ),
-          const SizedBox(width: 12),
 
-          // Next / Finish
-          ElevatedButton(
-            onPressed: isNextLoading ? null : onNext,
-            child: isNextLoading
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Colors.white),
-                  )
-                : Text(_isLastStep
-                    ? (nextLabel ?? 'Finish')
-                    : (nextLabel ?? 'Save & Continue')),
+          // Save & Exit + Save & Continue/Finish, grouped in their own
+          // Expanded rather than separated by a Spacer(). A Spacer is
+          // itself a flex participant (Expanded, flex: 1) — sharing a Row
+          // with the Flexible buttons below meant it competed for the same
+          // constrained width budget under space pressure, taking a full
+          // quarter of it for literally nothing rendered. Expanded here
+          // hands the *entire* remaining width (after Back's natural size)
+          // to this group, with `end` alignment reproducing the original
+          // "pushed to the right" look whenever there's slack to spare.
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                // Flexible (not a bare TextButton/ElevatedButton) so the
+                // Row can shrink these at large text-scale factors or on
+                // narrow screens instead of overflowing horizontally. Save
+                // & Exit yields space first (flex: 1 vs. 3) since Save &
+                // Continue/Finish is the primary action and should stay
+                // legible longer.
+                //
+                // FittedBox(scaleDown) is the primary defense against a
+                // label not fitting: it shrinks the whole label to fit
+                // available width rather than cutting it off, so "Save &
+                // Continue" stays complete (just smaller) instead of
+                // becoming "Save & ...". The Text's own overflow: ellipsis
+                // is only a last-resort backstop for a pathological case
+                // FittedBox itself can't satisfy — in practice unreachable,
+                // since FittedBox always finds a scale that fits.
+                //
+                // Tighter padding (vs. Material's ~24dp/side default)
+                // reclaims width for the label itself before FittedBox
+                // ever needs to shrink anything. Even so, "Back" + "Save &
+                // Exit" + "Save & Continue" together are more text than
+                // reliably fits at full natural size on every phone width
+                // at once — some shrink is an inherent consequence of the
+                // current button copy, not a layout bug. See the widget
+                // test file for the measured range across widths/scales.
+                Flexible(
+                  child: TextButton(
+                    onPressed: onSaveExit,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        'Save & Exit',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+
+                // Next / Finish
+                Flexible(
+                  flex: 3,
+                  child: ElevatedButton(
+                    onPressed: isNextLoading ? null : onNext,
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                    child: isNextLoading
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white),
+                          )
+                        : FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              _isLastStep
+                                  ? (nextLabel ?? 'Finish')
+                                  : (nextLabel ?? 'Save & Continue'),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),

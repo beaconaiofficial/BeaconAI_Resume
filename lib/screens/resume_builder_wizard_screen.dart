@@ -464,18 +464,20 @@ class _ResumeBuilderWizardScreenState
 
           // ── Step content ───────────────────────────────────────────────
           Expanded(child: _buildCurrentStep()),
-
-          // ── Bottom nav ─────────────────────────────────────────────────
-          WizardNavBar(
-            currentStep: _currentStep,
-            totalSteps: _totalSteps,
-            onBack: _onBack,
-            onNext: _onNext,
-            onSaveExit: _onSaveExit,
-            isNextLoading: _isLoading,
-            nextLabel: _currentStep == _totalSteps ? 'Finish' : null,
-          ),
         ],
+      ),
+      // bottomNavigationBar, not the last item in body's Column — same
+      // placement PreviewEditScreen/ResumeEditorScreen use for their own
+      // bottom bars, so it anchors to the true bottom edge rather than
+      // being subject to the body Column's layout.
+      bottomNavigationBar: WizardNavBar(
+        currentStep: _currentStep,
+        totalSteps: _totalSteps,
+        onBack: _onBack,
+        onNext: _onNext,
+        onSaveExit: _onSaveExit,
+        isNextLoading: _isLoading,
+        nextLabel: _currentStep == _totalSteps ? 'Finish' : null,
       ),
     );
   }
