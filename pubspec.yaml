@@ -59,3 +59,18 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # Codemagic build failure: google_mobile_ads (locked at ^4.0.0, predates
+  # that plugin's Swift Package Manager support) mixed with
+  # webview_flutter_wkwebview (SPM-adopted) triggers "A dependency conflict
+  # has occurred because google_mobile_ads uses CocoaPods while
+  # webview_flutter_wkwebview uses Swift Package Manager" during pod
+  # install. This is Flutter's own documented workaround
+  # (docs.flutter.dev/packages-and-plugins/swift-package-manager/for-app-developers#how-to-turn-off-swift-package-manager),
+  # not a permanent fix — Flutter's own docs warn the CocoaPods registry
+  # goes read-only 2026-12-02, after which disabling SPM like this won't
+  # be possible. Revisit once google_mobile_ads ships SPM support (current
+  # latest is 9.0.0 vs. the 4.0.0 locked here) rather than leaving this
+  # set indefinitely.
+  config:
+    enable-swift-package-manager: false
