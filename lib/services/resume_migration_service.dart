@@ -1,9 +1,9 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:uuid/uuid.dart';
 
 import '../models/app_enums.dart';
 import '../models/resume_sections.dart';
+import '../utils/app_logger.dart';
 import 'hive_service.dart';
 import 'resume_sanitizer.dart';
 
@@ -44,7 +44,7 @@ class ResumeMigrationService {
       return;
     }
 
-    debugPrint('[MIGRATION] Starting retroactive sanitization '
+    devLog('[MIGRATION] Starting retroactive sanitization '
         '(v${settings.experienceSanitizedVersion} → '
         'v${ResumeSanitizer.currentSanitizationVersion})');
 
@@ -71,8 +71,8 @@ class ResumeMigrationService {
         educationDeduped += result.educationDeduped;
       } catch (e, st) {
         resumesFailed++;
-        debugPrint('[MIGRATION] Failed to sanitize resume $resumeId: $e');
-        debugPrint('[MIGRATION] stacktrace: $st');
+        devLog('[MIGRATION] Failed to sanitize resume $resumeId: $e');
+        devLog('[MIGRATION] stacktrace: $st');
         // Continue with the remaining resumes — one bad resume shouldn't
         // block the rest, and since the version flag is only advanced
         // after the full loop, a failure here just means this resume gets
@@ -84,7 +84,7 @@ class ResumeMigrationService {
         ResumeSanitizer.currentSanitizationVersion;
     await HiveService.saveSettings(settings);
 
-    debugPrint('[MIGRATION] Complete — ${resumeIds.length} resume(s) '
+    devLog('[MIGRATION] Complete — ${resumeIds.length} resume(s) '
         'scanned, $resumesTouched touched, $resumesFailed failed, '
         '$entriesReclassified entries reclassified (training → '
         'certification), $entriesDeduped bare-duplicate/duplicate-of-cert '

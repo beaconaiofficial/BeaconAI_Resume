@@ -191,6 +191,16 @@ class AppConstants {
   static const String cloudflareWorkerUrl =
       'https://beaconai-proxy.beaconai-official.workers.dev';
 
+  // Sent as the `X-BeaconAI-Secret` header on every Worker request. The
+  // Worker's only other protection is a wildcard CORS header, which stops
+  // nothing — any script can still curl the URL directly. This value must
+  // match the `APP_SHARED_SECRET` secret configured on the Worker (see
+  // beaconai-proxy/src/index.js). It's compiled into the client binary and
+  // recoverable by decompiling the APK, so treat it as a filter against
+  // casual/scripted abuse of the endpoint, not as strong authentication.
+  static const String cloudflareWorkerSharedSecret =
+      '0d7086a7d953f5d4199353cc1e23e850acc92304e4055505d3698c1776faf500';
+
   // ── Connectivity ──────────────────────────────────────────────────────────────
   static const String offlineBannerMessage =
       'No internet connection. You can view and edit saved documents, but creating new content requires a connection.';
@@ -198,5 +208,5 @@ class AppConstants {
   // ── Debug / Test ──────────────────────────────────────────────────────────────
   /// Bypasses the $0.99 add-on combo purchase gate for testing.
   /// Set to false before production release — that is the ONLY change required.
-  static const bool kComboTestMode = true;
+  static const bool kComboTestMode = false;
 }

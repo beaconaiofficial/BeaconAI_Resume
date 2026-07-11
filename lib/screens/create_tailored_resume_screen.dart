@@ -18,6 +18,7 @@ import '../services/cloudflare_worker_service.dart';
 import '../services/phase2_api_service.dart';
 import '../services/revenue_cat_service.dart';
 import '../theme/app_colors.dart';
+import '../utils/app_logger.dart';
 import '../widgets/resume_template_renderer.dart';
 
 const _uuid = Uuid();
@@ -361,14 +362,14 @@ class _CreateTailoredResumeScreenState
         }
       }
     } catch (e) {
-      debugPrint('[TAILORED_SAVE] Failed to save tailored resume: $e');
+      devLog('[TAILORED_SAVE] Failed to save tailored resume: $e');
       if (createdResumeId != null) {
         await HiveService.resumeBox.delete(createdResumeId);
         for (final type in SectionTypeEnum.values) {
           await HiveService.resumeSectionBox
               .delete('${createdResumeId}_${type.name}');
         }
-        debugPrint(
+        devLog(
             '[TAILORED_SAVE] Cleaned up orphaned resume $createdResumeId');
       }
       if (createdDocId != null) {

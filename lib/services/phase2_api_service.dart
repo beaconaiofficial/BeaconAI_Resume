@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
 import '../models/resume_sections.dart';
 import '../services/cloudflare_worker_service.dart';
 import '../services/resume_sanitizer.dart';
+import '../utils/app_logger.dart';
 import '../widgets/resume_template_renderer.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -74,8 +74,8 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
       // caller's existing CloudflareApiException/catch(e) handling (see
       // _onExtractJobPosting in create_tailored_resume_screen.dart) show a
       // real error instead.
-      debugPrint('[EXTRACT_JOB_POSTING] JSON parse failed: $e');
-      debugPrint('[EXTRACT_JOB_POSTING] Raw response: $response');
+      devLog('[EXTRACT_JOB_POSTING] JSON parse failed: $e');
+      devLog('[EXTRACT_JOB_POSTING] Raw response: $response');
       rethrow;
     }
   }
@@ -164,19 +164,19 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     }
     final filtered = dupeMap.values.toList();
 
-    debugPrint('[PRE-PROCESS] ${original.length} entries in → '
+    devLog('[PRE-PROCESS] ${original.length} entries in → '
         '${filtered.length} entries after filtering');
-    debugPrint('[PRE-PROCESS] Dropped as training: '
+    devLog('[PRE-PROCESS] Dropped as training: '
         '${droppedAsTraining.map((e) => e.title).toList()}');
-    debugPrint('[PRE-PROCESS] Dropped as empty: '
+    devLog('[PRE-PROCESS] Dropped as empty: '
         '${droppedAsEmpty.map((e) => e.title).toList()}');
-    debugPrint('[PRE-PROCESS] Dropped as duplicate: '
+    devLog('[PRE-PROCESS] Dropped as duplicate: '
         '${droppedAsDupe.map((e) => e.title).toList()}');
 
     // ── CALL 1: RELEVANCE SCORING (Haiku) ─────────────────────────────────────
     final List<ExperienceEntry> top3;
     if (cachedTop3 != null) {
-      debugPrint('[CALL 1] Using cached relevance scores from a prior '
+      devLog('[CALL 1] Using cached relevance scores from a prior '
           'attempt in this session — not re-invoking Call 1');
       top3 = cachedTop3;
     } else {
@@ -254,10 +254,10 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
         '${CloudflareWorkerService.wrap(sanitizedResume)}\n\n'
         'Return the tailored resume as JSON matching the input schema exactly.';
 
-    debugPrint('[CALL 2] Prompt size: ${userMessage.length} chars');
-    debugPrint('[CALL 2] Experience entries: ${top3.length}');
-    debugPrint('[CALL 2] Skills: ${trimmedSkills.length}');
-    debugPrint('[CALL 2] Certs: ${trimmedCerts.length}');
+    devLog('[CALL 2] Prompt size: ${userMessage.length} chars');
+    devLog('[CALL 2] Experience entries: ${top3.length}');
+    devLog('[CALL 2] Skills: ${trimmedSkills.length}');
+    devLog('[CALL 2] Certs: ${trimmedCerts.length}');
 
     // ── CALL 2: RESUME GENERATION (Sonnet) ────────────────────────────────────
     const systemPrompt = '''
@@ -299,8 +299,8 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
         maxTokens: 4096,
       );
       final ms = DateTime.now().difference(tStart).inMilliseconds;
-      debugPrint('[CALL 2] Generation complete in ${ms}ms');
-      debugPrint('[CALL 2] Output size: ${rawResult.length} chars');
+      devLog('[CALL 2] Generation complete in ${ms}ms');
+      devLog('[CALL 2] Output size: ${rawResult.length} chars');
 
       // Filter certifications by the model's own certType tag (structured
       // signal, not a prose-only instruction) — compliance_training is
@@ -312,7 +312,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     } on TimeoutException catch (e) {
       final ms = e.duration?.inMilliseconds ??
           DateTime.now().difference(tStart).inMilliseconds;
-      debugPrint('[CALL 2] TIMEOUT after ${ms}ms');
+      devLog('[CALL 2] TIMEOUT after ${ms}ms');
       throw const CloudflareApiException(
         'Resume generation is taking longer than expected. '
         'Please check your connection and try again.',
@@ -320,7 +320,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     } on CloudflareApiException {
       rethrow;
     } catch (e) {
-      debugPrint('[CALL 2] UNKNOWN ERROR: ${e.runtimeType} — $e');
+      devLog('[CALL 2] UNKNOWN ERROR: ${e.runtimeType} — $e');
       throw const CloudflareApiException(
         'Something went wrong building your resume. Please try again.',
       );
@@ -376,11 +376,11 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     try {
       return await _scoreAndSelectEntries(jobPosting, entries);
     } catch (e) {
-      debugPrint('[CALL 1] First attempt failed ($e) — retrying once');
+      devLog('[CALL 1] First attempt failed ($e) — retrying once');
       try {
         return await _scoreAndSelectEntries(jobPosting, entries);
       } catch (e2) {
-        debugPrint('[CALL 1] Retry also failed ($e2) — surfacing a real '
+        devLog('[CALL 1] Retry also failed ($e2) — surfacing a real '
             'failure instead of silently using unfiltered entries');
         throw const CloudflareApiException(
           'Unable to determine which experience is most relevant to this '
@@ -454,8 +454,8 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
       final cleaned = CloudflareWorkerService.stripMarkdownFences(scoreResponse);
       parsed = jsonDecode(cleaned) as Map<String, dynamic>;
     } catch (e) {
-      debugPrint('[CALL 1] JSON parse failed: $e');
-      debugPrint('[CALL 1] Raw response: $scoreResponse');
+      devLog('[CALL 1] JSON parse failed: $e');
+      devLog('[CALL 1] Raw response: $scoreResponse');
       rethrow;
     }
 
@@ -465,8 +465,8 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
         s['id'] as String: (s['score'] as num).toInt()
     };
 
-    debugPrint('[CALL 1] Scored ${scoreMap.length} entries');
-    debugPrint('[CALL 1] Scores: '
+    devLog('[CALL 1] Scored ${scoreMap.length} entries');
+    devLog('[CALL 1] Scores: '
         '${scoreMap.entries.map((e) => "${e.key}: ${e.value}").toList()}');
 
     final scored = entries
@@ -484,9 +484,9 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
       result = (above3.isEmpty ? scored : above3).take(3).toList();
     }
 
-    debugPrint('[CALL 1] Selected ${result.length} entries after threshold + cap:');
+    devLog('[CALL 1] Selected ${result.length} entries after threshold + cap:');
     for (final e in result) {
-      debugPrint('[CALL 1]   → ${e.title} at ${e.company} '
+      devLog('[CALL 1]   → ${e.title} at ${e.company} '
           '(score: ${scoreMap[e.id] ?? 0}, bullets: ${e.bullets.length})');
     }
 
@@ -562,8 +562,8 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
       // analysis didn't actually run. Let the caller's existing
       // CloudflareApiException/catch(e) handling (see
       // ats_analyzer_screen.dart) show a real error instead.
-      debugPrint('[ANALYZE_KEYWORDS] JSON parse failed: $e');
-      debugPrint('[ANALYZE_KEYWORDS] Raw response: $response');
+      devLog('[ANALYZE_KEYWORDS] JSON parse failed: $e');
+      devLog('[ANALYZE_KEYWORDS] Raw response: $response');
       rethrow;
     }
   }
@@ -618,8 +618,8 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
       // signal anything went wrong. Let the caller's existing
       // CloudflareApiException/catch(e) handling (see
       // interview_prep_basic_screen.dart) show a real error instead.
-      debugPrint('[BASIC_INTERVIEW_PREP] JSON parse failed: $e');
-      debugPrint('[BASIC_INTERVIEW_PREP] Raw response: $response');
+      devLog('[BASIC_INTERVIEW_PREP] JSON parse failed: $e');
+      devLog('[BASIC_INTERVIEW_PREP] Raw response: $response');
       rethrow;
     }
   }
@@ -678,7 +678,7 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
     final sanitizedCompany = CloudflareWorkerService.sanitize(companyName);
 
     final clStart = DateTime.now();
-    debugPrint('[COVER_LETTER] Starting generation');
+    devLog('[COVER_LETTER] Starting generation');
     try {
       final clResult = await CloudflareWorkerService.sendPrompt(
         callLabel: 'generateCoverLetter',
@@ -691,20 +691,20 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
             'Write the cover letter:',
         maxTokens: 1000,
       );
-      debugPrint('[COVER_LETTER] SUCCESS — '
+      devLog('[COVER_LETTER] SUCCESS — '
           '${DateTime.now().difference(clStart).inMilliseconds} ms, '
           '${clResult.length} chars');
       return ResumeSanitizer.sanitizeAiText(clResult);
     } on TimeoutException catch (e) {
-      debugPrint('[COVER_LETTER] FLUTTER TIMEOUT after '
+      devLog('[COVER_LETTER] FLUTTER TIMEOUT after '
           '${e.duration?.inMilliseconds ?? DateTime.now().difference(clStart).inMilliseconds} ms');
       rethrow;
     } on CloudflareApiException catch (e) {
-      debugPrint('[COVER_LETTER] API ERROR: ${e.message} after '
+      devLog('[COVER_LETTER] API ERROR: ${e.message} after '
           '${DateTime.now().difference(clStart).inMilliseconds} ms');
       rethrow;
     } catch (e) {
-      debugPrint('[COVER_LETTER] UNKNOWN ERROR: ${e.runtimeType} — $e '
+      devLog('[COVER_LETTER] UNKNOWN ERROR: ${e.runtimeType} — $e '
           'after ${DateTime.now().difference(clStart).inMilliseconds} ms');
       rethrow;
     }

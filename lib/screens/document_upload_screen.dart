@@ -21,6 +21,7 @@ import '../services/cloudflare_worker_service.dart';
 import '../services/hive_service.dart';
 import '../services/resume_sanitizer.dart';
 import '../theme/app_colors.dart';
+import '../utils/app_logger.dart';
 import '../widgets/pending_decision_card.dart';
 import '../widgets/resume_template_renderer.dart';
 
@@ -245,7 +246,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
               uploadCount: freshResume.uploadCount + _processedFiles.length,
               tierLimit: tier.uploadLimit);
           if (stillAvailable <= 0) {
-            debugPrint('[UPLOAD LIMIT] Blocked before extraction call — '
+            devLog('[UPLOAD LIMIT] Blocked before extraction call — '
                 'uploadCount=${freshResume.uploadCount}, '
                 'processedThisBatch=${_processedFiles.length}, '
                 'tierLimit=${tier.uploadLimit}');
@@ -419,8 +420,8 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
     } on _PageLimitException {
       rethrow;
     } catch (e, st) {
-      debugPrint('[extractOneFile] error for $fileName: ${e.runtimeType}: $e');
-      debugPrint('[extractOneFile] stacktrace: $st');
+      devLog('[extractOneFile] error for $fileName: ${e.runtimeType}: $e');
+      devLog('[extractOneFile] stacktrace: $st');
       return null;
     }
   }
@@ -462,7 +463,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
       // the text path can't extract useful fields. Route to the multimodal
       // PDF path so Claude reads the visual rendering instead.
       if (_isLowQualityExtraction(rawText)) {
-        debugPrint('[PDF] low-quality text extraction → multimodal path');
+        devLog('[PDF] low-quality text extraction → multimodal path');
         if (mounted) {
           setState(() {
             _extractingProgressMessage =
@@ -483,7 +484,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
       }
 
       if (pageCount > 4 || rawText.length > 8000) {
-        debugPrint(
+        devLog(
             '[PDF] $pageCount pages, ${rawText.length} chars → chunked extraction');
         final json = await _extractInChunks(extractor, pageCount);
         return ('', json);
@@ -495,7 +496,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
         return (rawText, json);
       } on CloudflareApiException catch (e) {
         if (e.message.contains('timed out')) {
-          debugPrint('[PDF] single-call timed out → PDF bytes fallback');
+          devLog('[PDF] single-call timed out → PDF bytes fallback');
           final json =
               await CloudflareWorkerService.extractResumeFieldsFromPdf(bytes);
           return ('', json);
@@ -503,7 +504,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
         rethrow;
       }
     } on FormatException {
-      debugPrint('[PDF] local extraction failed → PDF bytes fallback');
+      devLog('[PDF] local extraction failed → PDF bytes fallback');
       final json =
           await CloudflareWorkerService.extractResumeFieldsFromPdf(bytes);
       return ('', json);
@@ -536,7 +537,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
           throw FormatException('PDF security restriction on page ${i + 1}: $e');
         }
         // Non-security page error: skip and continue with remaining pages.
-        debugPrint('[PDF] page ${i + 1} extraction error (skipped): $e');
+        devLog('[PDF] page ${i + 1} extraction error (skipped): $e');
       }
     }
     if (pages.isEmpty) {
@@ -613,7 +614,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
       final lowercase = text.replaceAll(RegExp(r'[^a-z]'), '');
       final lcRatio = lowercase.length / letters.length;
       if (lcRatio < 0.40) {
-        debugPrint('[EXTRACT] Font encoding failure detected — '
+        devLog('[EXTRACT] Font encoding failure detected — '
             'lowercase ratio: ${lcRatio.toStringAsFixed(3)} → multimodal path');
         return true;
       }
@@ -683,7 +684,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
       }
 
       if (cleaned.isEmpty) {
-        debugPrint('[PDF] pages ${startPage + 1}–${endPage + 1}: empty, skipping');
+        devLog('[PDF] pages ${startPage + 1}–${endPage + 1}: empty, skipping');
         continue;
       }
 
@@ -699,10 +700,10 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
           timeout: const Duration(seconds: 90),
         );
         chunkJsons.add(json);
-        debugPrint('[PDF] pages ${startPage + 1}–${endPage + 1}: OK');
+        devLog('[PDF] pages ${startPage + 1}–${endPage + 1}: OK');
       } on CloudflareApiException catch (e) {
         if (e.message.contains('timed out')) {
-          debugPrint(
+          devLog(
               '[PDF] pages ${startPage + 1}–${endPage + 1}: timed out, skipping');
           skippedRanges.add('${startPage + 1}–${endPage + 1}');
         } else {
@@ -1296,12 +1297,12 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
         resume.uploadCount += _processedFiles.length;
         await resume.save();
         final check = HiveService.resumeBox.get(_resumeId);
-        debugPrint('[UPLOAD COUNT] Hive value: ${check?.uploadCount}');
-        debugPrint('[UPLOAD COUNT] Source docs in box: '
+        devLog('[UPLOAD COUNT] Hive value: ${check?.uploadCount}');
+        devLog('[UPLOAD COUNT] Source docs in box: '
             '${HiveService.sourceDocumentBox.values.where((d) => d.resumeId == _resumeId).length}');
       } else {
-        debugPrint('[UPLOAD COUNT] SKIPPED — _resumeId=$_resumeId resume=null');
-        debugPrint('[UPLOAD COUNT] Source docs in box: '
+        devLog('[UPLOAD COUNT] SKIPPED — _resumeId=$_resumeId resume=null');
+        devLog('[UPLOAD COUNT] Source docs in box: '
             '${HiveService.sourceDocumentBox.values.where((d) => d.resumeId == _resumeId).length}');
       }
 

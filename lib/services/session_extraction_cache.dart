@@ -1,7 +1,9 @@
 import 'dart:collection';
 
 import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
+import '../utils/app_logger.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SessionExtractionCache — always-on, in-memory-only protection against
@@ -66,14 +68,14 @@ class SessionExtractionCache {
       // entry, per the LRU eviction order documented on _cache above.
       _cache.remove(key);
       _cache[key] = cached;
-      debugPrint('[SESSION CACHE] Reused extraction for '
+      devLog('[SESSION CACHE] Reused extraction for '
           '${hash.substring(0, 8)}… — no API call made');
       return cached;
     }
 
     final inFlight = _inFlight[key];
     if (inFlight != null) {
-      debugPrint('[SESSION CACHE] Request already in flight for '
+      devLog('[SESSION CACHE] Request already in flight for '
           '${hash.substring(0, 8)}… — awaiting it instead of firing a new call');
       return inFlight;
     }

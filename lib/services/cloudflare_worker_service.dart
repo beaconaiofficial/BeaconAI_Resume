@@ -1,9 +1,9 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 import '../constants/app_constants.dart';
 import '../models/supporting_models.dart';
+import '../utils/app_logger.dart';
 import 'dev_extraction_cache.dart';
 import 'resume_sanitizer.dart';
 import 'session_extraction_cache.dart';
@@ -311,7 +311,7 @@ class CloudflareWorkerService {
       costLabel = '~\$${cost.toStringAsFixed(5)}';
     }
 
-    debugPrint('[COST] $callLabel | $model | '
+    devLog('[COST] $callLabel | $model | '
         'in=$inputTokens out=$outputTokens '
         'cacheWrite=$cacheCreationTokens cacheRead=$cacheReadTokens | '
         '$costLabel');
@@ -390,7 +390,10 @@ class CloudflareWorkerService {
       final response = await client
           .post(
             Uri.parse(AppConstants.cloudflareWorkerUrl),
-            headers: {'Content-Type': 'application/json'},
+            headers: {
+              'Content-Type': 'application/json',
+              'X-BeaconAI-Secret': AppConstants.cloudflareWorkerSharedSecret,
+            },
             body: body,
           )
           // Haiku (extraction) → 30 s; Sonnet (generation) → 90 s.
@@ -402,7 +405,7 @@ class CloudflareWorkerService {
         final decoded = jsonDecode(response.body) as Map<String, dynamic>;
         _logUsage(callLabel, model, decoded);
         if (decoded['stop_reason'] == 'max_tokens') {
-          debugPrint('[$callLabel] TRUNCATED — hit the $maxTokens-token cap');
+          devLog('[$callLabel] TRUNCATED — hit the $maxTokens-token cap');
           throw CloudflareTruncatedResponseException(maxTokens);
         }
         final content = decoded['content'] as List<dynamic>?;
@@ -460,7 +463,10 @@ class CloudflareWorkerService {
       final response = await client
           .post(
             Uri.parse(AppConstants.cloudflareWorkerUrl),
-            headers: {'Content-Type': 'application/json'},
+            headers: {
+              'Content-Type': 'application/json',
+              'X-BeaconAI-Secret': AppConstants.cloudflareWorkerSharedSecret,
+            },
             body: body,
           )
           .timeout(_webSearchTimeout);
@@ -756,7 +762,10 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
             final response = await client
                 .post(
                   Uri.parse(AppConstants.cloudflareWorkerUrl),
-                  headers: {'Content-Type': 'application/json'},
+                  headers: {
+              'Content-Type': 'application/json',
+              'X-BeaconAI-Secret': AppConstants.cloudflareWorkerSharedSecret,
+            },
                   body: body,
                 )
                 .timeout(_webSearchTimeout);
@@ -938,7 +947,10 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
             final response = await client
                 .post(
                   Uri.parse(AppConstants.cloudflareWorkerUrl),
-                  headers: {'Content-Type': 'application/json'},
+                  headers: {
+              'Content-Type': 'application/json',
+              'X-BeaconAI-Secret': AppConstants.cloudflareWorkerSharedSecret,
+            },
                   body: body,
                 )
                 .timeout(_webSearchTimeout);
@@ -1075,7 +1087,7 @@ Guidelines:
             'credentialId': null,
             'isAIPrefilled': true,
           });
-          debugPrint('[CLASSIFY] experience → training, moved to '
+          devLog('[CLASSIFY] experience → training, moved to '
               'certifications ${fromFallback ? '(fallback keyword list)' : '(model)'}: $title @ $company');
         case 'uncertain':
           final reason = (e['uncertaintyReason'] as String?)?.trim();
@@ -1090,9 +1102,9 @@ Guidelines:
             kind: PendingDecisionKind.employmentVsTraining,
             rawEntry: e,
           ));
-          debugPrint('[CLASSIFY] experience → uncertain (model): $title @ $company');
+          devLog('[CLASSIFY] experience → uncertain (model): $title @ $company');
         default: // 'employment'
-          debugPrint('[CLASSIFY] experience → employment '
+          devLog('[CLASSIFY] experience → employment '
               '${fromFallback ? '(fallback keyword list)' : '(model)'}: $title @ $company');
           // Bullet cap intentionally does NOT run here — it runs once, in
           // parseFieldMappings, after dedup. Capping before dedup and
@@ -1152,7 +1164,7 @@ Guidelines:
             'credentialId': null,
             'isAIPrefilled': true,
           });
-          debugPrint('[CLASSIFY] education → non-degree training, moved to '
+          devLog('[CLASSIFY] education → non-degree training, moved to '
               'certifications ${fromFallback ? '(fallback keyword list)' : '(model)'}: $institution');
         case 'uncertain':
           final reason = (e['uncertaintyReason'] as String?)?.trim();
@@ -1167,9 +1179,9 @@ Guidelines:
             kind: PendingDecisionKind.degreeVsNonDegreeTraining,
             rawEntry: e,
           ));
-          debugPrint('[CLASSIFY] education → uncertain (model): $institution');
+          devLog('[CLASSIFY] education → uncertain (model): $institution');
         default: // 'degree'
-          debugPrint('[CLASSIFY] education → degree '
+          devLog('[CLASSIFY] education → degree '
               '${fromFallback ? '(fallback keyword list)' : '(model)'}: $institution');
           degrees.add(e);
       }
@@ -1199,7 +1211,7 @@ Guidelines:
       }
 
       if (skillType == 'course_title') {
-        debugPrint('[CLASSIFY] skill → course title, excluded: $name');
+        devLog('[CLASSIFY] skill → course title, excluded: $name');
       } else {
         kept.add(e);
       }
@@ -1238,12 +1250,12 @@ Guidelines:
 
       switch (certType) {
         case 'compliance_training':
-          debugPrint('[CLASSIFY] cert dropped as compliance training '
+          devLog('[CLASSIFY] cert dropped as compliance training '
               '${fromFallback ? '(fallback keyword list)' : '(model)'}: $name');
         case 'award_recognition':
           // No fallback path can produce this (see comment above), so it's
           // always model-classified — no need to print the origin.
-          debugPrint('[CLASSIFY] cert dropped as award/recognition '
+          devLog('[CLASSIFY] cert dropped as award/recognition '
               '(not a certification, model): $name');
         case 'uncertain':
           final reason = (c['certUncertaintyReason'] as String?)?.trim();
@@ -1258,9 +1270,9 @@ Guidelines:
             kind: PendingDecisionKind.credentialVsCompliance,
             rawEntry: c,
           ));
-          debugPrint('[CLASSIFY] cert → uncertain (model): $name');
+          devLog('[CLASSIFY] cert → uncertain (model): $name');
         default: // 'credential'
-          debugPrint('[CLASSIFY] cert → credential '
+          devLog('[CLASSIFY] cert → credential '
               '${fromFallback ? '(fallback keyword list)' : '(model)'}: $name');
           credentials.add(c);
       }
@@ -1393,13 +1405,13 @@ Guidelines:
       suggestions.sort((a, b) =>
           (b['confidence'] as double).compareTo(a['confidence'] as double));
 
-      debugPrint('[parseFieldMappings] OK — ${suggestions.length} fields mapped, '
+      devLog('[parseFieldMappings] OK — ${suggestions.length} fields mapped, '
           '${pendingDecisions.length} pending decisions');
       return ExtractionParseResult(
           mappings: suggestions, pendingDecisions: pendingDecisions);
     } catch (e) {
-      debugPrint('[parseFieldMappings] PARSE ERROR: $e');
-      debugPrint('[parseFieldMappings] raw (first 600): '
+      devLog('[parseFieldMappings] PARSE ERROR: $e');
+      devLog('[parseFieldMappings] raw (first 600): '
           '${extractedJson.length > 600 ? extractedJson.substring(0, 600) : extractedJson}');
       return const ExtractionParseResult(mappings: [], pendingDecisions: []);
     }

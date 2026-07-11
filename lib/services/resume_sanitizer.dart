@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart' show debugPrint;
+import '../utils/app_logger.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ResumeSanitizer
@@ -824,7 +824,7 @@ class ResumeSanitizer {
       });
 
       if (isDuplicate) {
-        debugPrint('[SANITIZE] Dropped experience entry duplicating an '
+        devLog('[SANITIZE] Dropped experience entry duplicating an '
             'existing certification of the same title: ${e['title']}');
       }
       return !isDuplicate;
@@ -848,7 +848,7 @@ class ResumeSanitizer {
         certType == 'compliance_training' ||
         certType == 'award_recognition' ||
         certType == 'uncertain') {
-      debugPrint(
+      devLog(
           '[ResumeSanitizer] cert → $certType (model): "${cert['name']}"');
       return certType!;
     }
@@ -860,7 +860,7 @@ class ResumeSanitizer {
     final isCompliance =
         fallbackComplianceCertPatterns.any((p) => name.contains(p));
     final fallbackType = isCompliance ? 'compliance_training' : 'credential';
-    debugPrint('[ResumeSanitizer] cert missing/invalid certType — fallback '
+    devLog('[ResumeSanitizer] cert missing/invalid certType — fallback '
         'keyword list engaged: "${cert['name']}" → $fallbackType');
     return fallbackType;
   }
@@ -882,7 +882,7 @@ class ResumeSanitizer {
       final cert = raw as Map<String, dynamic>;
       final certType = classifyCertType(cert);
       if (certType == 'compliance_training' || certType == 'award_recognition') {
-        debugPrint('[ResumeSanitizer] tailored resume cert excluded '
+        devLog('[ResumeSanitizer] tailored resume cert excluded '
             '($certType): ${cert['name']}');
         continue;
       }

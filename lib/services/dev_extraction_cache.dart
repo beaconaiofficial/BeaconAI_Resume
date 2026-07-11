@@ -1,6 +1,8 @@
 import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:hive_ce/hive.dart';
+
+import '../utils/app_logger.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DevExtractionCache — dev-only local cache for Claude document-extraction
@@ -63,7 +65,7 @@ class DevExtractionCache {
     final key = _keyFor(label, hash);
     final cached = box.get(key);
     if (cached != null) {
-      debugPrint('[DEV CACHE] Skipped API call — using cached extraction '
+      devLog('[DEV CACHE] Skipped API call — using cached extraction '
           'for $label (${hash.substring(0, 8)}…)');
       return cached;
     }
@@ -81,6 +83,6 @@ class DevExtractionCache {
     final box = await _openBox();
     final count = box.length;
     await box.clear();
-    debugPrint('[DEV CACHE] Cleared ($count entries removed)');
+    devLog('[DEV CACHE] Cleared ($count entries removed)');
   }
 }
