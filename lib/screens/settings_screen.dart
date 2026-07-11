@@ -1,13 +1,19 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../constants/app_constants.dart';
 import '../models/app_enums.dart';
 import '../providers/user_settings_provider.dart';
+import '../services/bug_report_service.dart';
 import '../services/dev_extraction_cache.dart';
+import '../services/external_link_service.dart';
 import '../services/hive_service.dart';
 import '../theme/app_colors.dart';
+
+const String _websiteUrl = 'https://getbeaconai.dev';
+const String _websiteDisplay = 'getbeaconai.dev';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SettingsScreen
@@ -122,6 +128,19 @@ class SettingsScreen extends ConsumerWidget {
               ),
             ],
           ),
+          const SizedBox(height: 20),
+          _SettingsSection(
+            title: 'Support',
+            isDark: isDark,
+            children: [
+              _SettingsTile(
+                icon: Icons.bug_report_outlined,
+                label: 'Report a Bug',
+                isDark: isDark,
+                onTap: () => _reportBug(context),
+              ),
+            ],
+          ),
           // Only ever visible when DevExtractionCache._enabled has been
           // manually flipped to true in a local debug build — invisible in
           // every normal debug run and every release build. See FIX 8.
@@ -148,10 +167,98 @@ class SettingsScreen extends ConsumerWidget {
               ],
             ),
           ],
+          const SizedBox(height: 28),
+          _WebsiteFooterLink(isDark: isDark),
         ],
       ),
     );
   }
+}
+
+// Launches the bug-report mailto link; falls back to a copyable-email
+// dialog if no mail handler is available (common on web/desktop).
+Future<void> _reportBug(BuildContext context) async {
+  final launched = await BugReportService.sendBugReport();
+  if (launched || !context.mounted) return;
+
+  await _showCopyableFallbackDialog(
+    context,
+    title: 'Report a Bug',
+    message:
+        "We couldn't open a mail app on this device. Please email us directly at:",
+    displayText: BugReportService.supportEmail,
+    copyLabel: 'Copy Email',
+    copiedMessage: 'Email address copied',
+  );
+}
+
+// Opens the website footer link; falls back to a copyable-URL dialog if no
+// browser handler is available (more common on web/desktop than mobile).
+Future<void> _openWebsite(BuildContext context) async {
+  final launched = await ExternalLinkService.open(_websiteUrl);
+  if (launched || !context.mounted) return;
+
+  await _showCopyableFallbackDialog(
+    context,
+    title: 'Visit Our Website',
+    message: "We couldn't open a browser on this device. Please visit:",
+    displayText: _websiteDisplay,
+    copyLabel: 'Copy Link',
+    copiedMessage: 'Website address copied',
+  );
+}
+
+// Shared fallback for every external-link action in Settings (bug report,
+// website): a dialog showing the destination as selectable text plus a
+// one-tap copy, for the common no-handler-configured case on web/desktop.
+Future<void> _showCopyableFallbackDialog(
+  BuildContext context, {
+  required String title,
+  required String message,
+  required String displayText,
+  required String copyLabel,
+  required String copiedMessage,
+}) {
+  return showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(title,
+          style: GoogleFonts.playfairDisplay(
+              fontSize: 18, fontWeight: FontWeight.w600)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            message,
+            style: GoogleFonts.inter(fontSize: 14, height: 1.5),
+          ),
+          const SizedBox(height: 10),
+          SelectableText(
+            displayText,
+            style: GoogleFonts.inter(
+                fontSize: 14.5, fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Close'),
+        ),
+        ElevatedButton(
+          onPressed: () {
+            Clipboard.setData(ClipboardData(text: displayText));
+            Navigator.pop(ctx);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(copiedMessage)),
+            );
+          },
+          child: Text(copyLabel),
+        ),
+      ],
+    ),
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -586,6 +693,43 @@ class _StorageSummary extends StatelessWidget {
                 : '${settings.totalUploadCount} / ${settings.tier.uploadLimit == -1 ? "∞" : settings.tier.uploadLimit}',
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Website Footer Link — quiet, centered, below every real settings section.
+// Not styled as a settings option: no icon, no chevron, muted secondary
+// color rather than the accent used for every tappable row above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _WebsiteFooterLink extends StatelessWidget {
+  const _WebsiteFooterLink({required this.isDark});
+  final bool isDark;
+
+  @override
+  Widget build(BuildContext context) {
+    final secondary =
+        isDark ? AppColors.secondaryTextDark : AppColors.secondaryTextLight;
+    return Center(
+      child: Semantics(
+        label:
+            'For more information or to see our other apps, visit $_websiteDisplay',
+        button: true,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: () => _openWebsite(context),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Text(
+              'For more information or to see our other apps, please visit '
+              '$_websiteDisplay',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(fontSize: 11.5, color: secondary),
+            ),
+          ),
+        ),
       ),
     );
   }
