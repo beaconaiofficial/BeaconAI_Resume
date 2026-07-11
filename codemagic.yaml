@@ -1,0 +1,68 @@
+workflows:
+  ios-testflight:
+    name: iOS - Build and publish to TestFlight
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+
+    # No `triggering:` block on purpose — this workflow is manual-trigger
+    # only (via the Codemagic UI or API). This is the first iOS build for
+    # this project; an unreviewed auto-publish-to-TestFlight pipeline on
+    # every push isn't something to default into. Add a `triggering:`
+    # block later if/when that's actually wanted.
+
+    integrations:
+      # This name must exactly match whatever you name the App Store
+      # Connect API key integration you add in Codemagic's Team
+      # integrations settings (Teams > Integrations > App Store Connect).
+      # "app_store_connect" is just this workflow's chosen name for it —
+      # rename either side so they match.
+      app_store_connect: app_store_connect
+
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: dev.getbeaconai.beaconai-resume
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+
+    scripts:
+      - name: Set up code signing settings on Xcode project
+        script: |
+          xcode-project use-profiles
+
+      - name: Get Flutter packages
+        script: |
+          flutter pub get
+
+      - name: Run Flutter test suite
+        script: |
+          flutter test
+        # No ignore_failure — a broken test suite should block the build,
+        # not waste a signing/build cycle on code that's already known bad.
+
+      - name: Flutter analyze
+        script: |
+          flutter analyze
+
+      - name: Install CocoaPods dependencies
+        script: |
+          find . -name "Podfile" -execdir pod install \;
+
+      - name: Flutter build ipa
+        script: |
+          flutter build ipa --release \
+            --export-options-plist=/Users/builder/export_options.plist
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        # No beta_groups listed — this lands in Internal Testing (visible
+        # to the app's internal App Store Connect team) rather than being
+        # auto-distributed to any external tester group. Add beta_groups
+        # here once there's an actual external testing group to target.
