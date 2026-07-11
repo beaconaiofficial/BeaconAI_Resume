@@ -1,7 +1,7 @@
 name: beaconai_resume
 description: BeaconAI Resume — ATS-optimized resume builder with AI assistance.
 publish_to: 'none'
-version: 1.0.0+9
+version: 1.0.0+14
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -45,6 +45,8 @@ dependencies:
   xml: ^6.0.0
   syncfusion_flutter_pdf: ^33.2.0
   crypto: ^3.0.7
+  url_launcher: ^6.3.0
+  package_info_plus: ^8.0.0
 
 dev_dependencies:
   flutter_test:
