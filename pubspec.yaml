@@ -1,7 +1,7 @@
 name: beaconai_resume
 description: BeaconAI Resume — ATS-optimized resume builder with AI assistance.
 publish_to: 'none'
-version: 1.0.0+14
+version: 1.0.0+16
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
