@@ -68,6 +68,8 @@
 	</array>
 	<key>GADApplicationIdentifier</key>
 	<string>ca-app-pub-3292773894584155~3016101607</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>BeaconAI Resume needs access to your photos so you can upload a photo of your resume, transcript, or other document to have your information extracted automatically.</string>
 	<key>SKAdNetworkItems</key>
 	<array>
 		<dict>
