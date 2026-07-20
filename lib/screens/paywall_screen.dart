@@ -9,6 +9,7 @@ import '../constants/app_constants.dart';
 import '../models/app_enums.dart';
 import '../models/supporting_models.dart';
 import '../providers/user_settings_provider.dart';
+import '../services/external_link_service.dart';
 import '../services/hive_service.dart';
 import '../services/revenue_cat_service.dart';
 import '../theme/app_colors.dart';
@@ -294,6 +295,21 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
                   const SizedBox(height: 20),
                   ..._buildPackageCards(settings.tier),
                   const SizedBox(height: 12),
+                  Center(
+                    child: TextButton(
+                      onPressed: () => ExternalLinkService.open(
+                          AppConstants.privacyPolicyUrl),
+                      child: Text(
+                        'Privacy Policy',
+                        style: GoogleFonts.inter(
+                          fontSize: 12,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
                   if (_actionError != null) ...[
                     _ErrorBanner(message: _actionError!, isDark: isDark),
                     const SizedBox(height: 12),
