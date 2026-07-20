@@ -861,10 +861,10 @@ class _BottomNav extends StatelessWidget {
           // Primary CTA
           if (isOnTierCard)
             Semantics(
-              label: 'Start free, set up your resume',
+              label: 'Continue, set up your resume',
               child: ElevatedButton(
                 onPressed: onFinish,
-                child: const Text('Start Free'),
+                child: const Text('Continue'),
               ),
             )
           else
