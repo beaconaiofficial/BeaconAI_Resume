@@ -7,6 +7,8 @@ class AppConstants {
   // ── App Info ─────────────────────────────────────────────────────────────────
   static const String appName = 'BeaconAI Resume';
   static const String privacyPolicyUrl = 'https://getbeaconai.dev/privacy';
+  static const String termsOfUseUrl =
+      'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/';
   static const String backupFileName = 'BeaconAI_Resume_Backup';
   static const String backupDataFileName = 'beaconai_data.json';
   static const String backupVersion = '1.0';

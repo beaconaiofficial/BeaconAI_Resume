@@ -296,17 +296,45 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
                   ..._buildPackageCards(settings.tier),
                   const SizedBox(height: 12),
                   Center(
-                    child: TextButton(
-                      onPressed: () => ExternalLinkService.open(
-                          AppConstants.privacyPolicyUrl),
-                      child: Text(
-                        'Privacy Policy',
-                        style: GoogleFonts.inter(
-                          fontSize: 12,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                          decoration: TextDecoration.underline,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        TextButton(
+                          onPressed: () => ExternalLinkService.open(
+                              AppConstants.privacyPolicyUrl),
+                          child: Text(
+                            'Privacy Policy',
+                            style: GoogleFonts.inter(
+                              fontSize: 12,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                              decoration: TextDecoration.underline,
+                            ),
+                          ),
                         ),
-                      ),
+                        Text(
+                          '·',
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => ExternalLinkService.open(
+                              AppConstants.termsOfUseUrl),
+                          child: Text(
+                            'Terms of Use',
+                            style: GoogleFonts.inter(
+                              fontSize: 12,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                              decoration: TextDecoration.underline,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   const SizedBox(height: 4),
