@@ -48,6 +48,12 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
   List<Package> _packages = [];
   String? _loadError;
 
+  // TEMP DEBUG - remove before release
+  // Raw RevenueCat error code/message, surfaced on-screen so the iOS
+  // "Pricing is temporarily unavailable" root cause is visible without
+  // Xcode Console access.
+  String? _debugError;
+
   bool _purchaseInFlight = false;
   bool _restoreInFlight = false;
   String? _actionError;
@@ -71,6 +77,7 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
     setState(() {
       _loadingPackages = true;
       _loadError = null;
+      _debugError = null; // TEMP DEBUG - remove before release
     });
     try {
       final packages = await RevenueCatService.getAvailablePackages();
@@ -81,6 +88,13 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
         if (packages.isEmpty) {
           _loadError =
               'Pricing is temporarily unavailable. Please try again shortly.';
+          // TEMP DEBUG - remove before release
+          _debugError = [
+            if (RevenueCatService.lastConfigureError != null)
+              'configure(): ${RevenueCatService.lastConfigureError}',
+            if (RevenueCatService.lastPackagesError != null)
+              'getOfferings(): ${RevenueCatService.lastPackagesError}',
+          ].join('\n');
         }
         // Extract the add-on package from the offering if it's present,
         // so _onPurchaseAddOn can call purchasePackage() instead of the
@@ -90,12 +104,14 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
                 p.storeProduct.identifier.toLowerCase().contains('addon'))
             .firstOrNull;
       });
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       setState(() {
         _loadingPackages = false;
         _loadError =
             'Could not load pricing. Check your connection and try again.';
+        // TEMP DEBUG - remove before release
+        _debugError = '${e.runtimeType} - $e';
       });
     }
   }
@@ -282,6 +298,22 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
               children: [
                 if (_loadError != null) ...[
                   _ErrorBanner(message: _loadError!, isDark: isDark),
+                  // TEMP DEBUG - remove before release
+                  // Raw RevenueCat error, visible on-device without Xcode
+                  // Console — see RevenueCatService.lastConfigureError /
+                  // lastPackagesError.
+                  if (_debugError != null && _debugError!.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    SelectableText(
+                      'Debug: $_debugError',
+                      style: GoogleFonts.robotoMono(
+                        fontSize: 11,
+                        color: isDark
+                            ? AppColors.errorDark
+                            : AppColors.errorLight,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   Center(
                     child: TextButton(

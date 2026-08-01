@@ -38,6 +38,13 @@ class RevenueCatService {
 
   static bool _configured = false;
 
+  // TEMP DEBUG - remove before release
+  // Populated by configure()/getAvailablePackages() on failure so
+  // paywall_screen.dart can display the real error on-screen without
+  // needing Xcode Console access (this is a Windows dev machine).
+  static String? lastConfigureError;
+  static String? lastPackagesError;
+
   // ── Configuration ────────────────────────────────────────────────────────
 
   /// Configures the SDK with the platform-appropriate API key. Call once at
@@ -62,9 +69,31 @@ class RevenueCatService {
       throw UnsupportedError('Unsupported platform for RevenueCat');
     }
 
-    await Purchases.setLogLevel(LogLevel.warn);
-    await Purchases.configure(configuration);
-    _configured = true;
+    // TEMP DEBUG - remove before release
+    // LogLevel.debug (was .warn) for maximally verbose RevenueCat SDK logs
+    // while chasing the iOS "Pricing is temporarily unavailable" bug.
+    await Purchases.setLogLevel(LogLevel.debug);
+
+    // TEMP DEBUG - remove before release
+    // configure() was previously unguarded here, relying entirely on the
+    // blanket try/catch in main.dart — which discards the exception with
+    // no logging at all. If SDK init itself is failing on iOS, every later
+    // Purchases.* call fails too, each independently swallowing its own
+    // PlatformException — so this is the earliest point a real root cause
+    // could be surfaced.
+    try {
+      await Purchases.configure(configuration);
+      _configured = true;
+      // ignore: avoid_print
+      print('[RC DEBUG] configure() succeeded');
+    } catch (e) {
+      // TEMP DEBUG - remove before release
+      lastConfigureError = '${e.runtimeType} - $e';
+      // ignore: avoid_print
+      print('[RC DEBUG] configure() FAILED: '
+          '${e.runtimeType} - $e');
+      rethrow;
+    }
   }
 
   /// Registers a listener that fires whenever CustomerInfo changes —
@@ -86,10 +115,20 @@ class RevenueCatService {
   /// "current" offering in the dashboard is a configuration error, not
   /// something the user should see a stack trace for.
   static Future<List<Package>> getAvailablePackages() async {
+    // TEMP DEBUG - remove before release
+    lastPackagesError = null;
     try {
       final offerings = await Purchases.getOfferings();
       return offerings.current?.availablePackages ?? [];
-    } on PlatformException {
+    } on PlatformException catch (e) {
+      // TEMP DEBUG - remove before release
+      // Previously: silently returned [] here, discarding e.code/e.message
+      // entirely — this is the exact spot the real iOS error was vanishing.
+      final code = PurchasesErrorHelper.getErrorCode(e);
+      lastPackagesError = '${code.name} - ${e.message}';
+      // ignore: avoid_print
+      print('[RC DEBUG] getAvailablePackages() FAILED: '
+          'code=${code.name} message=${e.message}');
       return [];
     }
   }
