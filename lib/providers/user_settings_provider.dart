@@ -33,6 +33,11 @@ class UserSettingsNotifier extends Notifier<UserSettings> {
     await HiveService.saveSettings(state);
   }
 
+  Future<void> acceptAiDataSharing() async {
+    state = state..aiDataSharingAccepted = true;
+    await HiveService.saveSettings(state);
+  }
+
   Future<void> setTheme(AppThemeEnum theme) async {
     state = state..theme = theme;
     await HiveService.saveSettings(state);

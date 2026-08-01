@@ -96,6 +96,13 @@ class UserSettings extends HiveObject {
   @HiveField(16, defaultValue: 0)
   int experienceSanitizedVersion;
 
+  /// True once the user has explicitly allowed sending uploaded document
+  /// content (resumes, job postings, certificates) to Anthropic's Claude API
+  /// for extraction/generation. Shown once, before the first such upload —
+  /// see AiConsentDialog. Does not gate manual (non-AI) resume entry.
+  @HiveField(17, defaultValue: false)
+  bool aiDataSharingAccepted;
+
   UserSettings({
     this.privacyAccepted = false,
     this.privacyAcceptedAt,
@@ -114,6 +121,7 @@ class UserSettings extends HiveObject {
     this.reduceMotionOverride,
     this.screenReaderHintsEnabled = true,
     this.experienceSanitizedVersion = 0,
+    this.aiDataSharingAccepted = false,
   }) : billingCycleStart = billingCycleStart ?? DateTime.now();
 
   // ── Computed Properties ─────────────────────────────────────────────────────
@@ -168,6 +176,7 @@ class UserSettings extends HiveObject {
         atsNotificationsEnabled: true,
         totalUploadCount: 0,
         screenReaderHintsEnabled: true,
+        aiDataSharingAccepted: false,
       );
 
   /// Returns a sanitized Map for backup JSON export.

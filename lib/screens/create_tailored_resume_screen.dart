@@ -19,6 +19,7 @@ import '../services/phase2_api_service.dart';
 import '../services/revenue_cat_service.dart';
 import '../theme/app_colors.dart';
 import '../utils/app_logger.dart';
+import '../widgets/ai_consent_dialog.dart';
 import '../widgets/resume_template_renderer.dart';
 
 const _uuid = Uuid();
@@ -198,6 +199,9 @@ class _CreateTailoredResumeScreenState
           'No master resume found. Complete your master resume first.');
       return;
     }
+
+    final consented = await AiConsentDialog.ensureConsent(context, ref);
+    if (!consented || !mounted) return;
 
     final isOnline = ref.read(isOnlineProvider);
     if (!isOnline) {
