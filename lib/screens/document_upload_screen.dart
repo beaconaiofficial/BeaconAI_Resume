@@ -22,6 +22,7 @@ import '../services/hive_service.dart';
 import '../services/resume_sanitizer.dart';
 import '../theme/app_colors.dart';
 import '../utils/app_logger.dart';
+import '../widgets/ai_consent_dialog.dart';
 import '../widgets/pending_decision_card.dart';
 import '../widgets/resume_template_renderer.dart';
 
@@ -156,6 +157,9 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
   // ── File picking ───────────────────────────────────────────────────────────
 
   Future<void> _pickFiles() async {
+    final consented = await AiConsentDialog.ensureConsent(context, ref);
+    if (!consented || !mounted) return;
+
     final isOnline = ref.read(isOnlineProvider);
     if (!isOnline) {
       setState(() => _errorMessage =

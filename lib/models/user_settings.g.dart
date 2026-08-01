@@ -35,13 +35,14 @@ class UserSettingsAdapter extends TypeAdapter<UserSettings> {
       screenReaderHintsEnabled: fields[15] as bool,
       experienceSanitizedVersion:
           fields[16] == null ? 0 : (fields[16] as num).toInt(),
+      aiDataSharingAccepted: fields[17] == null ? false : fields[17] as bool,
     );
   }
 
   @override
   void write(BinaryWriter writer, UserSettings obj) {
     writer
-      ..writeByte(17)
+      ..writeByte(18)
       ..writeByte(0)
       ..write(obj.privacyAccepted)
       ..writeByte(1)
@@ -75,7 +76,9 @@ class UserSettingsAdapter extends TypeAdapter<UserSettings> {
       ..writeByte(15)
       ..write(obj.screenReaderHintsEnabled)
       ..writeByte(16)
-      ..write(obj.experienceSanitizedVersion);
+      ..write(obj.experienceSanitizedVersion)
+      ..writeByte(17)
+      ..write(obj.aiDataSharingAccepted);
   }
 
   @override
