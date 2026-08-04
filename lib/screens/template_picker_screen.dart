@@ -6,6 +6,7 @@ import '../models/resume.dart';
 import '../services/hive_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/resume_template_renderer.dart';
+import '../widgets/wizard_widgets.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TemplatePickerScreen
@@ -153,6 +154,18 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
       ),
       body: Column(
         children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: SectionTipCard(
+              tip: 'Pick whatever looks best to you — for ATS purposes it '
+                  'doesn\'t matter. Every export is generated as clean '
+                  'single-column text regardless of which template you '
+                  'choose here; the template only affects how your resume '
+                  'looks when a human reads it.',
+              icon: Icons.palette_outlined,
+            ),
+          ),
+
           // ── Horizon accent color picker (shown when Horizon is selected) ──
           if (_selectedTemplateId == AppConstants.templateHorizon)
             _HorizonAccentPicker(

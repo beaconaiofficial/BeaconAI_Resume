@@ -60,17 +60,24 @@ class _HarnessState extends State<_Harness> {
           failedFileNames: const [],
           mappings: _mappings,
           pendingDecisions: _pending,
+          unplacedFindings: const [],
+          timelineGaps: const [],
           isDark: false,
           showSourceFile: false,
           onToggleMapping: (i, accepted) {
             setState(() => _mappings[i]['accepted'] = accepted);
           },
+          onManualLocationChanged: (i, city, state) {},
           onResolveDecision: (id, decision) {
             widget.onResolved(id, decision);
             setState(() {
               _pending = _pending.where((d) => d.id != id).toList();
             });
           },
+          onResolveUnplacedFinding: (id,
+              {attachToEducationIndex, appendToExperienceIndex}) {},
+          onResolveBulletMetric: (experienceIndex, bulletIndex, metricText) {},
+          onResolveTimelineGap: (id, status) {},
           onApplyAll: () {},
           onCancel: () {},
         ),

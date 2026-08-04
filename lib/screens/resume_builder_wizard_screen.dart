@@ -789,7 +789,7 @@ class _ResumeTextPreview extends StatelessWidget {
                       style: GoogleFonts.inter(
                           fontSize: 12, color: onSurfaceVariant)),
                   Expanded(
-                    child: Text(b,
+                    child: Text(b.text,
                         style: GoogleFonts.inter(
                             fontSize: 12, height: 1.5, color: onSurface)),
                   ),

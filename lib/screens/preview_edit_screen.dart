@@ -336,8 +336,18 @@ class _PreviewEditScreenState extends ConsumerState<PreviewEditScreen> {
       ExperienceEntry e, String field, String value) {
     if (field.startsWith('bullet.')) {
       final bulletIdx = int.tryParse(field.split('.').last) ?? 0;
-      final bullets = List<String>.from(e.bullets);
-      if (bulletIdx < bullets.length) bullets[bulletIdx] = value;
+      final bullets = List<BulletEntry>.from(e.bullets);
+      if (bulletIdx < bullets.length) {
+        // A manual edit resolves the metric-request prompt for this bullet
+        // (same "prefilled clears on edit" rule the rest of the app
+        // follows) — the user has taken ownership of the wording, so it
+        // shouldn't nag them again on a later visit.
+        bullets[bulletIdx] = BulletEntry(
+          text: value,
+          hasQuantifiableData: bullets[bulletIdx].hasQuantifiableData,
+          metricRequested: true,
+        );
+      }
       return ExperienceEntry(
           id: e.id,
           title: e.title,

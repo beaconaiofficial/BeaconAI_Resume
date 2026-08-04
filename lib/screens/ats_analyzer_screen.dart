@@ -9,6 +9,7 @@ import '../services/cloudflare_worker_service.dart';
 import '../services/phase2_api_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/resume_template_renderer.dart';
+import '../widgets/wizard_widgets.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AtsAnalyzerScreen
@@ -120,6 +121,15 @@ class _AtsAnalyzerScreenState extends ConsumerState<AtsAnalyzerScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          const SectionTipCard(
+            tip: 'This score estimates how closely your resume\'s keywords '
+                'match the job posting — it\'s what an Applicant Tracking '
+                'System checks before a human ever sees your resume. It\'s '
+                'a signal to improve keyword alignment, not a guarantee of '
+                'an interview.',
+            icon: Icons.query_stats_outlined,
+          ),
+
           // Input section
           _InputCard(
             controller: _jdController,

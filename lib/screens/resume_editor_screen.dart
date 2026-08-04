@@ -75,6 +75,27 @@ class _ResumeEditorScreenState extends ConsumerState<ResumeEditorScreen> {
 
   final _editorScrollController = ScrollController();
 
+  // Soft, dismissible length nudge for Tailored Resumes only — Master
+  // Resume is expected to be comprehensive and is never sent to an
+  // employer directly, so it never shows this. Populated from
+  // EditorPreviewPane's own (more accurate, post-measurement) page count
+  // rather than re-deriving a heuristic here.
+  int? _previewPageCount;
+  bool _lengthWarningDismissed = false;
+
+  // Stage 7 — reported once ResumeTemplateRenderer's density-tier retry
+  // loop settles: true only when a Tailored Resume still exceeds the
+  // 2-page max at compact (the tightest tier) — i.e. tiering already tried
+  // and failed to bring it into range, not merely "this happens to be
+  // long." Master Resumes never report true (Stage 9 — no page limit).
+  bool _exceedsTailoredMax = false;
+
+  void _onDensityResult(DensityTier tier, int pageCount, bool exceedsTailoredMax) {
+    if (exceedsTailoredMax != _exceedsTailoredMax) {
+      setState(() => _exceedsTailoredMax = exceedsTailoredMax);
+    }
+  }
+
   @override
   void dispose() {
     _editorScrollController.dispose();
@@ -547,6 +568,21 @@ class _ResumeEditorScreenState extends ConsumerState<ResumeEditorScreen> {
     );
   }
 
+  void _onPreviewPageCountChanged(int count) {
+    if (count != _previewPageCount) {
+      setState(() => _previewPageCount = count);
+    }
+  }
+
+  // Stage 7: gated on _exceedsTailoredMax now, not a raw page-count
+  // threshold — the density-tier retry loop already tried comfortable,
+  // standard, and compact before this ever becomes true, so seeing this
+  // banner means tiering was exhausted, not just "this happens to be
+  // long." Still Tailored-only (implied by _exceedsTailoredMax, which
+  // ResumeTemplateRenderer never reports true for a Master Resume) and
+  // still dismissible, same as before.
+  bool get _showLengthWarning => !_lengthWarningDismissed && _exceedsTailoredMax;
+
   // ── Wide layout: two-pane ──────────────────────────────────────────────────
 
   Widget _buildWideLayout(bool isDark, int atsScore) {
@@ -562,6 +598,12 @@ class _ResumeEditorScreenState extends ConsumerState<ResumeEditorScreen> {
               color: isDark ? AppColors.accentDark : AppColors.accentLightColor,
               minHeight: 2,
             ),
+          if (_showLengthWarning)
+            _TailoredLengthWarningBanner(
+              pageCount: _previewPageCount ?? 0,
+              isDark: isDark,
+              onDismiss: () => setState(() => _lengthWarningDismissed = true),
+            ),
           Expanded(
             child: Row(
               children: [
@@ -572,6 +614,8 @@ class _ResumeEditorScreenState extends ConsumerState<ResumeEditorScreen> {
                     resume: _resume!,
                     renderData: _liveRenderData,
                     isDark: isDark,
+                    onPageCountChanged: _onPreviewPageCountChanged,
+                    onDensityResult: _onDensityResult,
                   ),
                 ),
                 VerticalDivider(
@@ -620,6 +664,12 @@ class _ResumeEditorScreenState extends ConsumerState<ResumeEditorScreen> {
                     isDark ? AppColors.accentDark : AppColors.accentLightColor,
                 minHeight: 2,
               ),
+            if (_showLengthWarning)
+              _TailoredLengthWarningBanner(
+                pageCount: _previewPageCount ?? 0,
+                isDark: isDark,
+                onDismiss: () => setState(() => _lengthWarningDismissed = true),
+              ),
             Expanded(
               child: TabBarView(
                 children: [
@@ -627,6 +677,8 @@ class _ResumeEditorScreenState extends ConsumerState<ResumeEditorScreen> {
                     resume: _resume!,
                     renderData: _liveRenderData,
                     isDark: isDark,
+                    onPageCountChanged: _onPreviewPageCountChanged,
+                    onDensityResult: _onDensityResult,
                   ),
                   _buildEditorContent(isDark),
                 ],
@@ -1239,6 +1291,82 @@ class _SourceDocumentsContent extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// _TailoredLengthWarningBanner
+//
+// Soft, dismissible nudge — shown only once ResumeTemplateRenderer's
+// Stage 7 density-tier retry loop has already tried comfortable, standard,
+// and compact and the Tailored Resume STILL exceeds the 2-page max (see
+// _exceedsTailoredMax) — never for Master (comprehensive by design, never
+// sent to an employer as-is). Consistent with the project's existing
+// pattern of nudging rather than blocking (see dashboard_screen.dart's
+// _ResetBanner for the same dismissible-banner shape, warning-toned here
+// instead of accent-toned since this is flagging something worth fixing,
+// not just offering an available action).
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _TailoredLengthWarningBanner extends StatelessWidget {
+  const _TailoredLengthWarningBanner({
+    required this.pageCount,
+    required this.isDark,
+    required this.onDismiss,
+  });
+
+  final int pageCount;
+  final bool isDark;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final warningColor =
+        isDark ? AppColors.warningDark : AppColors.warningLight;
+    final overBy = pageCount - 2;
+
+    return Semantics(
+      liveRegion: true,
+      label: 'This resume is running long at $overBy over a 2-page fit — '
+          'trim a section, or keep it at $pageCount pages.',
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: warningColor.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: warningColor.withValues(alpha: 0.3)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.warning_amber_rounded, size: 16, color: warningColor),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'This resume is running long at $overBy over a 2-page fit, '
+                'even at the most compact layout — trim a section, or keep '
+                'it at $pageCount pages.',
+                style: GoogleFonts.inter(
+                  fontSize: 12,
+                  height: 1.4,
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
+              ),
+            ),
+            IconButton(
+              icon: Icon(Icons.close,
+                  size: 16,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant),
+              tooltip: 'Dismiss',
+              onPressed: onDismiss,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              padding: EdgeInsets.zero,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Preview pane — pinch-to-zoom, pan, double-tap/pill to reset.
 //
 // No inline tap-to-edit here (that only ever existed in the old, unrouted
@@ -1262,11 +1390,27 @@ class EditorPreviewPane extends StatefulWidget {
     required this.resume,
     required this.renderData,
     required this.isDark,
+    this.onPageCountChanged,
+    this.onDensityResult,
   });
 
   final Resume resume;
   final ResumeRenderData renderData;
   final bool isDark;
+
+  /// Reports this build's page count (heuristic first frame, the more
+  /// accurate measured value once available — see _scheduleMeasurement).
+  /// Optional: only screens that need to react to length (e.g. the Tailored
+  /// Resume length nudge) provide this.
+  final ValueChanged<int>? onPageCountChanged;
+
+  /// Stage 7 — forwarded straight from the i==0 page-card's
+  /// ResumeTemplateRenderer (see the doc comment at that call site for why
+  /// only i==0, matching _measureKey's existing convention): the density
+  /// tier it settled on, the resulting page count, and whether a Tailored
+  /// Resume still exceeds the 2-page max even at compact.
+  final void Function(DensityTier tier, int pageCount, bool exceedsTailoredMax)?
+      onDensityResult;
 
   @override
   State<EditorPreviewPane> createState() => EditorPreviewPaneState();
@@ -1410,6 +1554,11 @@ class EditorPreviewPaneState extends State<EditorPreviewPane>
     // the measurement for this frame's render (stale RenderBoxes from a
     // previous frame are simply never queried again once superseded).
     _scheduleMeasurement();
+    if (widget.onPageCountChanged != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.onPageCountChanged!(pageCount);
+      });
+    }
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -1446,6 +1595,13 @@ class EditorPreviewPaneState extends State<EditorPreviewPane>
                     child: ResumeTemplateRenderer(
                       resume: widget.resume,
                       data: widget.renderData,
+                      // Only the i==0 copy reports — every page-card
+                      // renders its own full independent
+                      // ResumeTemplateRenderer instance (same pattern
+                      // _measureKey already uses), so all of them settle
+                      // on the same tier/page count; reporting from just
+                      // one avoids pageCount duplicate callbacks per cycle.
+                      onDensityResult: i == 0 ? widget.onDensityResult : null,
                     ),
                   ),
                 ),

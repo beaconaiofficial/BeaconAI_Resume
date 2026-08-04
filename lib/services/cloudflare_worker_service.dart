@@ -32,15 +32,73 @@ const _uuid = Uuid();
 // and image paths.
 //
 // Prompt caching was evaluated for this constant + _kMilitaryDocumentParsingRules
-// (extractResumeFields' full rendered system prompt) and skipped: measured
-// via a live max_tokens:0 call at 3,330 input tokens, below Haiku 4.5's
-// 4,096-token minimum cacheable prefix — cache_control would be a silent
-// no-op as-is. Not padded artificially to clear the threshold; revisit only
-// if this content grows for genuine quality reasons, or Anthropic lowers
-// the minimum.
+// (extractResumeFields' full rendered system prompt) and skipped as of the
+// last measurement: a live max_tokens:0 call put it at 3,330 input tokens,
+// below Haiku 4.5's 4,096-token minimum cacheable prefix — cache_control
+// would be a silent no-op as-is. Stages 8/9 added the document-type-
+// taxonomy and master-resume-completeness content below, which has NOT
+// been re-measured since — re-run the max_tokens:0 check before relying on
+// this comment's number again; this content may now be close to or over
+// the threshold.
 const _kEntryClassificationRules = r'''
 
 ENTRY CLASSIFICATION RULES (apply to every document, for every entry):
+
+━━━ MASTER RESUME COMPLETENESS — READ CAREFULLY, THIS OVERRIDES YOUR ━━━
+━━━ DEFAULT RESUME-WRITING INSTINCTS ━━━
+
+This document is being extracted into a MASTER RESUME — an exhaustive
+personal record with NO PAGE LIMIT and no space constraint. Everything
+else in this prompt about brevity, trimming, or a professional target
+length is about a SEPARATE, LATER step (a job-specific tailored resume)
+that you are not performing right now. Do not let ordinary resume-writing
+conventions ("keep it to one page," "trim to the strongest few," "this is
+too much detail") shape what you extract here — those instincts are wrong
+for this task specifically, even though they are usually correct.
+
+Concretely:
+- Two bullets that SOUND similar are NOT automatically the same
+  achievement. If they cite different specific facts — different numbers,
+  scope, outcome, or timeframe — keep BOTH, even though a human editor
+  might later merge them for a tailored resume. Only treat two bullets as
+  duplicates when they describe the literal same fact reported twice (the
+  same underlying sentence pulled from two documents).
+- NEVER omit an entire employment period, role, or document's content
+  because it seems "not relevant," "too old," "too junior," or "unlikely to
+  matter for a job search." Relevance judgment belongs entirely to the
+  later, separate tailored-resume step — not this one. Every period
+  documented in the source material must appear in the output.
+- Do not shorten, cap, or trim any section (experience, bullets, skills,
+  certifications) to fit an assumed page length. There is no page length
+  here. A long, detailed response is the CORRECT output, not a problem to
+  fix.
+
+━━━ DOCUMENT TYPE ━━━
+
+Set the top-level "documentType" field to identify the kind of document you
+are parsing, using exactly one of these values:
+- "stp": a Soldier Talent Profile (assignment-history table with MOS codes,
+  Comd Duty Title / Organization / Station columns).
+- "ncoer": an NCOER, EPR, FITREP, or OER-style periodic performance
+  evaluation (rating period, Part IV bullet comments, ACHIEVES/DEVELOPS
+  sections).
+- "jst": a Joint Services Transcript (MOS descriptions, ACE-credited course
+  list with SH values, "Dates Held" fields).
+- "transcript": a civilian academic transcript (course list, credit hours,
+  GPA, degree-granting institution).
+- "civilian_resume": a standard civilian resume or CV.
+- "award_recommendation": a DA Form 638-shaped award recommendation — an
+  achievement narrative/citation written to justify a specific award,
+  covering a defined award period (e.g. "Period Covered: FROM ... TO ...").
+- "equipment_qualification": a DA Form 348-shaped equipment/vehicle
+  operator qualification record.
+- "training_certificate": a standalone training/course-completion
+  certificate (not a full transcript, not an award).
+- "other": anything that doesn't clearly match one of the above (a cover
+  letter, a LinkedIn export, etc.).
+This tag is used to decide which document wins when the same fact (a date,
+a duty station, a GPA) is reported differently across multiple uploaded
+documents — never leave it blank; pick the closest match if uncertain.
 
 ━━━ EXPERIENCE ENTRIES — employment vs. training ━━━
 
@@ -64,19 +122,40 @@ CONSOLIDATION RULE — same title, multiple locations/stations:
 - If the same job title appears at multiple different units, duty stations,
   or office locations for the same employer, create EXACTLY ONE experience
   entry for that title. Use the earliest start date and latest end date
-  across all occurrences. Merge the best and most specific bullets from all
-  occurrences into the single entry — select the 4-6 most
-  achievement-oriented, specific bullets and drop generic duty descriptions
-  that would apply to anyone holding that title. Do NOT create separate
-  entries for each location.
+  across all occurrences. Merge ALL achievement-oriented, specific bullets
+  from every occurrence into the single entry — see the MASTER RESUME
+  COMPLETENESS rule near the top of these instructions: there is no bullet
+  count to select down to here. Only drop a bullet if it fails the Bullet
+  Quality Rule below (a generic duty description with no independent
+  value), never merely to shorten the list. Do NOT create separate entries
+  for each location.
 
 BULLET QUALITY RULE:
-- Maximum 6 bullets per experience entry in the master resume.
-- Prefer bullets that contain: numbers, percentages, team sizes, equipment
-  or system names, specific outcomes, or leadership scope.
+- No maximum bullet count per experience entry in the master resume — see
+  the MASTER RESUME COMPLETENESS rule near the top of these instructions.
+- For EVERY bullet, actively attempt to extract or infer a quantifiable
+  result from the source material — a percentage, dollar figure, headcount
+  or team size, time saved, volume/scale, or other measurable outcome. Read
+  the surrounding source text (not just the sentence the bullet is drawn
+  from) for a number that belongs to that specific achievement before
+  concluding none exists — do not stop at the first generic phrasing.
+- If no quantifiable result exists anywhere in the source material for a
+  given achievement, keep the bullet ONLY if it independently demonstrates
+  a specific, relevant skill, responsibility, or scope of work with real
+  resume value on its own — not a vague, generic restatement of the job
+  title or duty description. Otherwise, exclude the bullet rather than
+  padding the entry with a low-value, unquantified line.
 - Drop bullets that are generic duty descriptions copied from a manual,
   job description, or regulation rather than something the person actually
   did or achieved.
+- Every bullet is an object: {"text": "...", "hasQuantifiableData": true or
+  false} — not a bare string. Set hasQuantifiableData to true when the
+  bullet's text itself contains the quantifiable result you found or
+  inferred (a number, percentage, dollar figure, headcount, or similar).
+  Set it to false when you kept the bullet for its independent skill/scope
+  value despite finding no quantifiable result anywhere in the source
+  material for it — this is a real, expected outcome for some bullets, not
+  a mistake to avoid. Never leave this field out.
 
 REWRITE RULE for dense jargon:
 - Translate dense, role-specific jargon, abbreviations, and internal
@@ -85,6 +164,24 @@ REWRITE RULE for dense jargon:
   other specialized field. Keep a specific system or tool name verbatim only
   when it is the kind of term that would appear in a job posting for that
   field (e.g. a named software platform).
+- This rewrite rule also applies to the "title" and "company" fields
+  themselves, not just bullet text. "title" must always be a civilian-
+  legible, recognizable job title — never a raw internal duty title,
+  jargon-heavy role code, or field-specific rank/grade/tier used as if it
+  were a job title. "company" must always be a plain-language description
+  of the employer/organization — never a bare internal unit designation,
+  cost-center code, or organizational abbreviation with no meaning outside
+  that organization. This applies to any field with internal titling
+  conventions (military duty titles and unit designations, hospital
+  department codes, corporate internal team names), not just military
+  documents.
+- A person's rank, grade, pay grade, or seniority tier (military rank, a
+  civil-service GS grade, a corporate band/level, etc.) is never itself a
+  job title — always extract and translate the actual duty/role title to
+  its civilian equivalent instead. If no distinct duty title is available
+  at all, infer the most accurate civilian-equivalent title from the role's
+  actual responsibilities described in the source material, rather than
+  falling back to the rank.
 
 ━━━ EDUCATION ENTRIES — degree vs. non-degree training ━━━
 
@@ -166,6 +263,45 @@ Generate a professional summary that reflects the person's OVERALL career
 arc and strongest qualifications, not just their most recent role. Write
 3-4 sentences. Do not copy from any existing summary in the document.
 
+Never state a specific number, figure, or factual claim (a GPA, a
+percentage, a dollar amount, a count of anything) in the summary unless
+that exact figure also appears in one of the structured fields you
+extracted elsewhere in this response (an education entry's gpa, an
+experience bullet, etc.). If the source material contains a specific
+figure that seems noteworthy but you're not confident which structured
+field it belongs to (or it doesn't cleanly fit any of them), do not guess
+by writing it into the summary anyway — report it via unplacedFindings
+instead (see below) and write the summary without it.
+
+━━━ UNPLACED FINDINGS ━━━
+
+While reading the source material, you will sometimes encounter a specific
+number, figure, or factual claim that seems worth keeping but does not
+cleanly map to any structured field above — for example, a GPA figure on a
+page that doesn't clearly belong to any single education entry, or a
+headcount/percentage mentioned in passing that isn't tied to a specific
+bullet you extracted. Report each one as an object in the top-level
+"unplacedFindings" array instead of silently dropping it OR silently
+folding it into prose (the summary, a bullet, anywhere) where it can't be
+verified against a structured field:
+{"value": "3.94 GPA", "context": "the surrounding sentence or two of source
+text the figure appeared in, verbatim or near-verbatim, so the reader can
+judge where it actually belongs"}
+Only use this for figures you are NOT confident belong to a specific
+structured field you already populated — if a number clearly belongs to a
+specific education entry's gpa or a specific experience bullet, put it
+there directly and do not also duplicate it here.
+
+━━━ REMINDER: THIS IS A MASTER RESUME, NOT A TAILORED ONE ━━━
+
+Before finalizing your response, re-check it against the MASTER RESUME
+COMPLETENESS rule near the top of these instructions: did you merge two
+distinct achievements because they sounded similar, or drop an entire
+employment period or document's content because it seemed less relevant?
+If so, undo it. Every distinct achievement and every documented employment
+period must be present in your output — exhaustiveness is the correct
+result here, conciseness is not your job in this step.
+
 ━━━ OUTPUT CHARACTER RULE ━━━
 
 Never use the characters < > ; or a backtick (`) anywhere in your output.
@@ -191,6 +327,27 @@ the formats below):
 - "BCT NETOPS" → "Brigade Combat Team network operations"
 - "COMSEC" → "communications security (COMSEC)"
 - MOS codes like "25N", "88M" → never include raw MOS codes in bullets
+
+━━━ CIVILIAN TITLE & EMPLOYER TRANSLATION ━━━
+Applies the general title/company rewrite rule above, with concrete
+military examples — these are illustrative, not an exhaustive lookup list;
+apply the same translation logic to any duty title or unit designation
+that follows this pattern, not just the exact strings below.
+- Raw duty titles such as "TC NETWORK COMMUNICATION SYSTEMS", "SR NODAL NET
+  SYS OPR-M", "FC HEAVY VEHICLE DRIVER" → translate to the civilian-
+  equivalent title implied by the underlying MOS/duty description (e.g.
+  "Network Communications Systems Operator", "Senior Network Systems
+  Technician", "Heavy Equipment/Logistics Operator") in the "title" field —
+  never output the raw abbreviated duty-title string verbatim.
+- Raw unit/organization strings such as "W6NF INSTALLATION RCPTN CENTE",
+  "0317 EN BN CO C BRIGADE SI", "D CO, 3-81, 199TH, MCOE" → translate to a
+  plain-language organization description (e.g. "U.S. Army, Installation
+  Reception Center", "U.S. Army, Engineer Battalion", "U.S. Army, Infantry
+  Company, Maneuver Center of Excellence") in the "company" field — never
+  output the raw UIC/unit-designation string verbatim.
+- Rank or rank-with-modifier (e.g. "SGT(P)", "Staff Sergeant", "SSG") must
+  never be used as the "title" value — always extract the actual duty
+  title being performed and translate it per the rule above.
 
 ━━━ JST (Joint Services Transcript) ━━━
 
@@ -225,11 +382,15 @@ date to both startDate and endDate.
 
 ━━━ NCOER ━━━
 
-INCLUDE: name and rank from Part I; Principal Duty Title as job title; unit
-and dates as an experience entry (entryType: "employment"); bullet comments
-from Part IV (lines starting with "o") as experience bullets — these ARE
-personal documented achievements, include them; prioritize ACHIEVES and
-DEVELOPS section bullets over DUTY DESCRIPTION.
+INCLUDE: name and rank from Part I; Principal Duty Title translated to its
+civilian equivalent (per the Civilian Title & Employer Translation rule
+above) as the "title" field — never the raw Principal Duty Title string,
+and never the rank; unit translated to a plain-language organization
+description (same rule) and dates as an experience entry (entryType:
+"employment"); bullet comments from Part IV (lines starting with "o") as
+experience bullets — these ARE personal documented achievements, include
+them; prioritize ACHIEVES and DEVELOPS section bullets over DUTY
+DESCRIPTION.
 
 EXCLUDE: SSN/DOD ID numbers, rater/senior rater personal information,
 APFT/ACFT scores (unless specifically impressive, e.g. 300+), checkbox
@@ -239,16 +400,76 @@ ratings and numerical codes.
 
 INCLUDE: name and rank; assignment history table as experience entries
 (entryType: "employment"), applying the consolidation rule above (same MOS
-title = one entry, not one per duty station); EXCLUDING rows with MOS code
-"99999Z" (Standard Excess — not a real job); EXCLUDING projected/future
-assignments; awards as certifications; Military Education courses as
-certifications (classify with certType per the JST guidance above); civilian
-education degree (entryType: "degree").
+title = one entry, not one per duty station); the "Comd Duty Title" and
+"Organization"/"Station" columns translated to civilian-equivalent title
+and plain-language employer per the Civilian Title & Employer Translation
+rule above — never the raw duty-title or UIC/unit strings verbatim, and
+never rank as the title; EXCLUDING rows with MOS code "99999Z" (Standard
+Excess — not a real job); EXCLUDING projected/future assignments; awards as
+certifications; Military Education courses as certifications (classify
+with certType per the JST guidance above); civilian education degree
+(entryType: "degree").
 
 EXCLUDE: ASVAB scores, PULHES, MRC codes; all "Self-Professed" sections
 showing "0 Self-Professed"; career mapping projections; DLPT scores listed
 as "Memorized Proficiency"; home address, date of birth, SSN, weight,
 height, religion, marital status.
+
+━━━ DA FORM 638 (AWARD RECOMMENDATION) ━━━
+
+INCLUDE: the achievement narrative/justification text as experience
+bullets (entryType: "employment") for the role the person held during the
+award period — these ARE personal documented achievements, exactly like an
+NCOER's Part IV comments, and are often MORE detailed and more quantified
+than an NCOER bullet for the same period; include them fully, do not treat
+them as secondary to an NCOER covering the same role. The "title" and
+"company" fields must be the person's duty position and unit AT THE TIME
+OF THE ACHIEVEMENT, translated to civilian-equivalent terms per the
+Civilian Title & Employer Translation rule above — using the SAME
+translation this document's NCOER or STP entry for that period would use,
+so this entry can be recognized as describing the same role and combined
+with it, not left as a separate duplicate entry.
+
+The award period (often labeled "Period Covered", "For the Period", or
+similar, given as a FROM/TO date pair) becomes this entry's startDate/
+endDate — a genuine date range, not a single award date, whenever both a
+FROM and a TO date are present. If only one date is given, use it as
+startDate, leave endDate empty, isCurrent: false (same convention as a
+JST's single "Dates Held" date).
+
+Also extract the award/medal name and level as a separate certification
+entry (certType: "award_recognition", per the certification rule above) —
+this is in ADDITION to, not instead of, using the narrative as experience
+bullets above; the two uses of this document's content are independent.
+
+EXCLUDE: approval-chain signatures and endorsement routing, admin
+approval/routing codes, awarding authority letterhead boilerplate.
+
+━━━ DA FORM 348 (EQUIPMENT QUALIFICATION RECORD) ━━━
+
+This document records which vehicles/equipment the person is qualified to
+operate — it does NOT describe a role, employer, or time period, so never
+create an experience entry from it.
+
+INCLUDE: each qualified equipment/vehicle type as a skill entry (skillType:
+"skill", e.g. "Heavy Equipment Operation", "Tactical Vehicle Operation")
+UNLESS the record functions as a formal licensure/qualification credential
+in its own right, in which case extract it as a certification entry
+(certType: "credential" per the certification rule above) instead — judge
+this the same way you judge any other credential-vs-skill boundary.
+
+EXCLUDE: raw equipment nomenclature/NSN or model codes, internal
+qualification-standard reference numbers, examiner signatures.
+
+━━━ STANDALONE TRAINING CERTIFICATE ━━━
+
+A standalone training/course-completion certificate (not a transcript, not
+an award). Extract as exactly ONE certification entry using the
+certificate's course/program name, issuing organization, and completion
+date — tag certType per the general certification rule above ("credential"
+for a genuine skill-differentiating credential, "compliance_training" for
+generic mandatory/administrative training). Do NOT create an experience or
+education entry from a standalone certificate.
 ''';
 
 class CloudflareWorkerService {
@@ -523,6 +744,7 @@ Return ONLY valid JSON with no explanation, no markdown, no code fences.
 
 JSON structure to return:
 {
+  "documentType": "",
   "contact": {
     "firstName": "",
     "lastName": "",
@@ -545,7 +767,9 @@ JSON structure to return:
       "startDate": "",
       "endDate": "",
       "isCurrent": false,
-      "bullets": [],
+      "bullets": [
+        {"text": "", "hasQuantifiableData": true}
+      ],
       "entryType": "employment",
       "uncertaintyReason": "",
       "isAIPrefilled": true
@@ -586,16 +810,24 @@ JSON structure to return:
       "certUncertaintyReason": "",
       "isAIPrefilled": true
     }
+  ],
+  "unplacedFindings": [
+    {
+      "value": "",
+      "context": ""
+    }
   ]
 }
 
 Guidelines:
 - Extract only what is present in the document. Leave fields empty string or empty array if not found.
 - For skills, categorize as: technical, softSkill, toolsSoftware, or uncategorized. Tag every skill with skillType per the classification rules below.
-- For experience bullets, use the exact text from the document — do not rewrite or embellish.
+- Each experience bullet is an object ({"text": ..., "hasQuantifiableData": ...}), not a bare string — see the bullet quality rule below for what belongs in "text" and how to set "hasQuantifiableData".
 - Set isAIPrefilled to true for all extracted fields.
 - UUID placeholders will be replaced by the app — use "uuid-placeholder" for all id fields.
 - entryType, uncertaintyReason, certType, certUncertaintyReason, and skillType are always required — see the classification rules below for how to set them.
+- unplacedFindings is required but usually empty ([]) — only populate it per the Unplaced Findings rule below.
+- documentType is always required — see the Document Type rule below for the allowed values.
 $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
 
     final sanitized = sanitize(rawDocumentText);
@@ -645,6 +877,7 @@ Return ONLY valid JSON with no explanation, no markdown, no code fences.
 
 JSON structure to return:
 {
+  "documentType": "",
   "contact": {
     "firstName": "",
     "lastName": "",
@@ -667,7 +900,9 @@ JSON structure to return:
       "startDate": "",
       "endDate": "",
       "isCurrent": false,
-      "bullets": [],
+      "bullets": [
+        {"text": "", "hasQuantifiableData": true}
+      ],
       "entryType": "employment",
       "uncertaintyReason": "",
       "isAIPrefilled": true
@@ -708,6 +943,12 @@ JSON structure to return:
       "certUncertaintyReason": "",
       "isAIPrefilled": true
     }
+  ],
+  "unplacedFindings": [
+    {
+      "value": "",
+      "context": ""
+    }
   ]
 }
 
@@ -715,10 +956,12 @@ Guidelines:
 - Extract only what is present in the document. Leave fields empty string or empty array if not found.
 - For military documents: map duty titles to experience.title, unit/organization to experience.company, duty descriptions/achievements to experience.bullets, MOS/training courses to certifications or skills.
 - For skills, categorize as: technical, softSkill, toolsSoftware, or uncategorized. Tag every skill with skillType per the classification rules below.
-- For experience bullets, use the exact text from the document — do not rewrite or embellish.
+- Each experience bullet is an object ({"text": ..., "hasQuantifiableData": ...}), not a bare string — see the bullet quality rule below for what belongs in "text" and how to set "hasQuantifiableData".
 - Set isAIPrefilled to true for all extracted fields.
 - UUID placeholders will be replaced by the app — use "uuid-placeholder" for all id fields.
 - entryType, uncertaintyReason, certType, certUncertaintyReason, and skillType are always required — see the classification rules below for how to set them.
+- unplacedFindings is required but usually empty ([]) — only populate it per the Unplaced Findings rule below.
+- documentType is always required — see the Document Type rule below for the allowed values.
 $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
 
     final base64Pdf = base64Encode(pdfBytes);
@@ -831,6 +1074,7 @@ Return ONLY valid JSON with no explanation, no markdown, no code fences.
 
 JSON structure to return:
 {
+  "documentType": "",
   "contact": {
     "firstName": "",
     "lastName": "",
@@ -853,7 +1097,9 @@ JSON structure to return:
       "startDate": "",
       "endDate": "",
       "isCurrent": false,
-      "bullets": [],
+      "bullets": [
+        {"text": "", "hasQuantifiableData": true}
+      ],
       "entryType": "employment",
       "uncertaintyReason": "",
       "isAIPrefilled": true
@@ -894,16 +1140,24 @@ JSON structure to return:
       "certUncertaintyReason": "",
       "isAIPrefilled": true
     }
+  ],
+  "unplacedFindings": [
+    {
+      "value": "",
+      "context": ""
+    }
   ]
 }
 
 Guidelines:
 - Extract only what is visible in the image. Leave fields empty string or empty array if not found.
 - For skills, categorize as: technical, softSkill, toolsSoftware, or uncategorized. Tag every skill with skillType per the classification rules below.
-- For experience bullets, use the exact text from the image — do not rewrite or embellish.
+- Each experience bullet is an object ({"text": ..., "hasQuantifiableData": ...}), not a bare string — see the bullet quality rule below for what belongs in "text" and how to set "hasQuantifiableData".
 - Set isAIPrefilled to true for all extracted fields.
 - UUID placeholders will be replaced by the app — use "uuid-placeholder" for all id fields.
 - entryType, uncertaintyReason, certType, certUncertaintyReason, and skillType are always required — see the classification rules below for how to set them.
+- unplacedFindings is required but usually empty ([]) — only populate it per the Unplaced Findings rule below.
+- documentType is always required — see the Document Type rule below for the allowed values.
 $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
 
     final base64Image = base64Encode(imageBytes);
@@ -1061,10 +1315,9 @@ Guidelines:
       final e = raw as Map<String, dynamic>;
       final company = e['company'] as String? ?? '';
       final title = e['title'] as String? ?? '';
-      final bullets = (e['bullets'] as List<dynamic>?)
-              ?.map((b) => b.toString())
-              .toList() ??
-          [];
+      final bullets = ResumeSanitizer.normalizeBulletList(e['bullets'])
+          .map((b) => b['text'] as String)
+          .toList();
 
       var entryType = e['entryType'] as String?;
       final fromFallback = entryType != 'employment' &&
@@ -1072,7 +1325,9 @@ Guidelines:
           entryType != 'uncertain';
       if (fromFallback) {
         final isTraining = ResumeSanitizer.fallbackTrainingCompanyPatterns
-            .any((p) => company.toLowerCase().contains(p));
+                .any((p) => company.toLowerCase().contains(p)) ||
+            ResumeSanitizer.fallbackTrainingTitlePatterns
+                .any((p) => title.toLowerCase().contains(p));
         entryType = isTraining ? 'education_training' : 'employment';
       }
 
@@ -1082,7 +1337,7 @@ Guidelines:
             'id': 'uuid-placeholder',
             'name': title,
             'issuer': company,
-            'dateEarned': e['startDate'] as String? ?? '',
+            'dateEarned': ResumeSanitizer.coerceToString(e['startDate']) ?? '',
             'expiresDate': null,
             'credentialId': null,
             'isAIPrefilled': true,
@@ -1159,7 +1414,7 @@ Guidelines:
             'id': 'uuid-placeholder',
             'name': degree.isNotEmpty ? degree : institution,
             'issuer': institution,
-            'dateEarned': e['graduationYear'] as String? ?? '',
+            'dateEarned': ResumeSanitizer.coerceToString(e['graduationYear']) ?? '',
             'expiresDate': null,
             'credentialId': null,
             'isAIPrefilled': true,
@@ -1321,6 +1576,17 @@ Guidelines:
       addIfNotEmpty('contact.state', contact['state'], 0.85);
       addIfNotEmpty('contact.phone', contact['phone'], 0.90);
       addIfNotEmpty('contact.email', contact['email'], 0.95);
+      // A .mil email stops working after separation from service — flag it
+      // as an informational nudge (never blocking) so the user thinks about
+      // adding a personal/civilian address before this becomes their sole
+      // contact method on the resume.
+      final email = contact['email'] as String?;
+      if (email != null && email.toLowerCase().trim().endsWith('.mil')) {
+        final emailSuggestion = suggestions.lastWhere(
+            (s) => s['field'] == 'contact.email',
+            orElse: () => <String, dynamic>{});
+        emailSuggestion['milEmailWarning'] = true;
+      }
       addIfNotEmpty('contact.linkedInUrl', contact['linkedInUrl'], 0.85);
       addIfNotEmpty('contact.websiteUrl', contact['websiteUrl'], 0.80);
       addIfNotEmpty('contact.gitHubUrl', contact['gitHubUrl'], 0.80);
@@ -1390,13 +1656,18 @@ Guidelines:
       final finalExperienceEntries = ResumeSanitizer.dropExperienceMatchingCertification(
           mergedExperience, certResult.credentials);
 
-      // Step 4: cap bullets on whatever survived dedup.
+      // Step 4: normalize bullet shape on whatever survived dedup. This
+      // function (parseFieldMappings) only ever runs against document-
+      // upload extraction results — there is no code path that reaches it
+      // for Tailored Resume generation (that flow operates on already-
+      // structured ResumeRenderData, never re-extracts from documents) —
+      // so this is unconditionally Master Resume construction. No bullet
+      // cap here per Stage 9: Master Resumes are exhaustive with no page
+      // limit. See ResumeSanitizer.capBullets's doc comment for where
+      // capping legitimately still belongs (Tailored Resume paths only).
       final finalExperience = finalExperienceEntries.map((raw) {
         final e = Map<String, dynamic>.from(raw as Map<String, dynamic>);
-        final bullets =
-            (e['bullets'] as List<dynamic>?)?.map((b) => b.toString()).toList() ??
-                [];
-        e['bullets'] = ResumeSanitizer.capBullets(bullets);
+        e['bullets'] = ResumeSanitizer.normalizeBulletList(e['bullets']);
         return e;
       }).toList();
 
@@ -1405,10 +1676,32 @@ Guidelines:
       suggestions.sort((a, b) =>
           (b['confidence'] as double).compareTo(a['confidence'] as double));
 
+      final rawUnplacedFindings =
+          data['unplacedFindings'] as List<dynamic>? ?? [];
+      final unplacedFindings = rawUnplacedFindings
+          .map((raw) {
+            final f = raw as Map<String, dynamic>;
+            return UnplacedFinding(
+              id: _uuid.v4(),
+              value: (f['value'] as String? ?? '').trim(),
+              context: (f['context'] as String? ?? '').trim(),
+            );
+          })
+          .where((f) => f.value.isNotEmpty)
+          .toList();
+
+      final documentType = (data['documentType'] as String?)?.trim();
+
       devLog('[parseFieldMappings] OK — ${suggestions.length} fields mapped, '
-          '${pendingDecisions.length} pending decisions');
+          '${pendingDecisions.length} pending decisions, '
+          '${unplacedFindings.length} unplaced findings, '
+          'documentType: $documentType');
       return ExtractionParseResult(
-          mappings: suggestions, pendingDecisions: pendingDecisions);
+          mappings: suggestions,
+          pendingDecisions: pendingDecisions,
+          unplacedFindings: unplacedFindings,
+          documentType:
+              (documentType != null && documentType.isNotEmpty) ? documentType : null);
     } catch (e) {
       devLog('[parseFieldMappings] PARSE ERROR: $e');
       devLog('[parseFieldMappings] raw (first 600): '
@@ -1429,10 +1722,26 @@ class ExtractionParseResult {
   const ExtractionParseResult({
     required this.mappings,
     required this.pendingDecisions,
+    this.unplacedFindings = const [],
+    this.documentType,
   });
 
   final List<Map<String, dynamic>> mappings;
   final List<PendingEntryDecision> pendingDecisions;
+
+  /// Numbers/claims Claude found but couldn't confidently map to a
+  /// structured field — surfaced on the confirmation screen for the user
+  /// to place or discard, never silently dropped or folded into prose.
+  final List<UnplacedFinding> unplacedFindings;
+
+  /// One of ResumeSanitizer's SourceDocType raw values ('stp', 'ncoer',
+  /// 'jst', 'transcript', 'civilian_resume', 'award_recommendation',
+  /// 'equipment_qualification', 'training_certificate', 'other') as
+  /// reported by the extraction model for this document, or null if
+  /// parsing failed before
+  /// this could be read. Used to break field-level conflicts between
+  /// documents by source authority — see ResumeSanitizer's priority tables.
+  final String? documentType;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

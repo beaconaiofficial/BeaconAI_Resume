@@ -260,20 +260,29 @@ class _InterviewPrepProScreenState
       pw.MultiPage(
         pageFormat: PdfPageFormat.letter,
         margin: const pw.EdgeInsets.symmetric(horizontal: 48, vertical: 48),
+        // Repeats on every page — see the matching comment in
+        // PdfExportService.generateResumePdf for why this must be header:,
+        // not the first item in build:.
+        header: (context) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text('Interview Preparation Guide',
+                style:
+                    pw.TextStyle(font: boldFont, fontSize: 22, color: navy)),
+            pw.SizedBox(height: 4),
+            pw.Text(
+              [guide.roleTitle, guide.companyName]
+                  .where((s) => s.isNotEmpty)
+                  .join(' at '),
+              style: pw.TextStyle(
+                  font: semiBoldFont, fontSize: 13, color: accent),
+            ),
+            pw.SizedBox(height: 12),
+            pw.Divider(color: lightGray, thickness: 0.8),
+            pw.SizedBox(height: 16),
+          ],
+        ),
         build: (context) => [
-          pw.Text('Interview Preparation Guide',
-              style: pw.TextStyle(font: boldFont, fontSize: 22, color: navy)),
-          pw.SizedBox(height: 4),
-          pw.Text(
-            [guide.roleTitle, guide.companyName]
-                .where((s) => s.isNotEmpty)
-                .join(' at '),
-            style:
-                pw.TextStyle(font: semiBoldFont, fontSize: 13, color: accent),
-          ),
-          pw.SizedBox(height: 12),
-          pw.Divider(color: lightGray, thickness: 0.8),
-          pw.SizedBox(height: 16),
           for (final q in guide.questions) ...[
             pw.Container(
               margin: const pw.EdgeInsets.only(bottom: 16),

@@ -98,12 +98,31 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
   /// [onEntriesSelected] fires once Call 1's result (fresh or cached) is
   /// known, before Call 2 starts, so the caller can stash it for a future
   /// retry attempt.
+  ///
+  /// [onDuplicateRoleCollision] — optional hook fired once per group of 2+
+  /// entries that share the same normalized title+company (see Step 3
+  /// below). Called with every colliding entry, most-bullets-first (the
+  /// natural "most complete record" default), and must return whichever
+  /// subset should survive into relevance scoring — never invented content,
+  /// only a selection among what was passed in. This is the same "user
+  /// confirms before anything is discarded" rule as the rest of the app's
+  /// conflict-resolution surfaces (see document_upload_screen.dart's
+  /// conflict/conflictGroupId/accepted pattern), exposed as a hook rather
+  /// than a concrete widget because this service function has no UI of its
+  /// own to render one. If no hook is supplied — true for every caller
+  /// today, since generateTailoredResume runs from a plain progress-spinner
+  /// step with no interactive surface in between — every colliding entry is
+  /// kept distinct rather than silently dropping any of them. That is a
+  /// deliberate "never guess" fallback, not a placeholder: this must not be
+  /// changed to auto-pick a winner even if a hook is unavailable.
   static Future<String> generateTailoredResume({
     required ResumeRenderData masterData,
     required JobPostingData jobPosting,
     void Function(String message)? onProgress,
     List<ExperienceEntry>? cachedTop3,
     void Function(List<ExperienceEntry> top3)? onEntriesSelected,
+    Future<List<ExperienceEntry>> Function(List<ExperienceEntry> colliding)?
+        onDuplicateRoleCollision,
   }) async {
     // ── PRE-PROCESSING ────────────────────────────────────────────────────────
     final original = masterData.experience;
@@ -122,7 +141,6 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
 
     final droppedAsTraining = <ExperienceEntry>[];
     final droppedAsEmpty = <ExperienceEntry>[];
-    final droppedAsDupe = <ExperienceEntry>[];
 
     // Step 1: Remove training entries by company name.
     final nonTraining = <ExperienceEntry>[];
@@ -145,24 +163,34 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
       }
     }
 
-    // Step 3: Deduplicate — same title + company; keep the one with more bullets.
-    final dupeMap = <String, ExperienceEntry>{};
+    // Step 3: Group same-title+company entries. Never silently discard a
+    // colliding entry — see onDuplicateRoleCollision's doc comment above for
+    // why this can't just pick a winner on its own.
+    final groups = <String, List<ExperienceEntry>>{};
     for (final e in withBullets) {
       final key =
           '${e.title.toLowerCase().trim()}|${e.company.toLowerCase().trim()}';
-      if (dupeMap.containsKey(key)) {
-        final existing = dupeMap[key]!;
-        if (e.bullets.length > existing.bullets.length) {
-          droppedAsDupe.add(existing);
-          dupeMap[key] = e;
-        } else {
-          droppedAsDupe.add(e);
-        }
-      } else {
-        dupeMap[key] = e;
-      }
+      groups.putIfAbsent(key, () => []).add(e);
     }
-    final filtered = dupeMap.values.toList();
+
+    final filtered = <ExperienceEntry>[];
+    var collisionGroupCount = 0;
+    for (final group in groups.values) {
+      if (group.length == 1) {
+        filtered.add(group.first);
+        continue;
+      }
+      collisionGroupCount++;
+      // Most-bullets-first — the pre-selected default a caller-supplied
+      // resolver should present, and also the "most complete record" order
+      // used when no resolver is supplied.
+      final sorted = [...group]
+        ..sort((a, b) => b.bullets.length.compareTo(a.bullets.length));
+      final resolved = onDuplicateRoleCollision != null
+          ? await onDuplicateRoleCollision(sorted)
+          : sorted; // no UI surface available — keep every entry distinct
+      filtered.addAll(resolved);
+    }
 
     devLog('[PRE-PROCESS] ${original.length} entries in → '
         '${filtered.length} entries after filtering');
@@ -170,8 +198,9 @@ ${ResumeSanitizer.noBlockedCharsPromptRule}
         '${droppedAsTraining.map((e) => e.title).toList()}');
     devLog('[PRE-PROCESS] Dropped as empty: '
         '${droppedAsEmpty.map((e) => e.title).toList()}');
-    devLog('[PRE-PROCESS] Dropped as duplicate: '
-        '${droppedAsDupe.map((e) => e.title).toList()}');
+    devLog('[PRE-PROCESS] Same-title+company collision groups found: '
+        '$collisionGroupCount (each resolved via onDuplicateRoleCollision if '
+        'supplied, otherwise kept distinct — never silently dropped)');
 
     // ── CALL 1: RELEVANCE SCORING (Haiku) ─────────────────────────────────────
     final List<ExperienceEntry> top3;

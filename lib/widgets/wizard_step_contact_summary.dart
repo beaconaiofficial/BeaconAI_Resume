@@ -139,12 +139,10 @@ class _WizardStepContactState extends State<WizardStepContact> {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
         children: [
-          // Tip (scratch path only)
-          if (!widget.isUploadPath)
-            const SectionTipCard(
-              tip: 'Use your full legal name. City and State are enough — '
-                  'no street address on a resume.',
-            ),
+          const SectionTipCard(
+            tip: 'Use your full legal name. City and State are enough — '
+                'no street address on a resume.',
+          ),
 
           // Name row
           Row(

@@ -1,4 +1,28 @@
 import '../utils/app_logger.dart';
+import '../models/supporting_models.dart';
+
+/// The document genres the extraction prompt asks Claude to self-report
+/// (see _kEntryClassificationRules' Document Type rule in
+/// CloudflareWorkerService) — used to break field-level conflicts between
+/// documents by source authority. 'other'/unrecognized values parse to
+/// null (see ResumeSanitizer.parseSourceDocType), not a member here, since
+/// an unknown type must never participate in priority tie-breaking.
+///
+/// awardRecommendation (DA Form 638-shaped), equipmentQualification (DA
+/// Form 348-shaped), and trainingCertificate (a standalone course-
+/// completion certificate) were added in Stage 8 — see the priority tier
+/// lists below for how awardRecommendation participates as a PEER of
+/// ncoer, not a subordinate, in duty-narrative tie-breaking.
+enum SourceDocType {
+  stp,
+  ncoer,
+  jst,
+  transcript,
+  civilianResume,
+  awardRecommendation,
+  equipmentQualification,
+  trainingCertificate,
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ResumeSanitizer
@@ -19,6 +43,25 @@ import '../utils/app_logger.dart';
 
 class ResumeSanitizer {
   ResumeSanitizer._();
+
+  /// Coerces a raw Claude JSON value to String?, treating a JSON number the
+  /// same way resume_sections.dart's model factories already do (see that
+  /// file's `_s()` helper) — Claude's extraction API sometimes returns GPA,
+  /// year, and date fields as JSON numbers (e.g. gpa: 3.9772) instead of
+  /// strings. Every function below that reads one of those fields directly
+  /// off a raw Claude JSON map — before it ever reaches the Hive-backed
+  /// model layer's own coercion — needs this too, or a numeric response
+  /// throws a type-cast error that parseFieldMappings' try/catch turns into
+  /// an empty result for the WHOLE document, not just the offending field.
+  /// Confirmed against a real extraction response during Stage 1 real-
+  /// document verification (a real GPA came back as a JSON double and this
+  /// exact crash reproduced before this fix).
+  static String? coerceToString(dynamic v) {
+    if (v == null) return null;
+    if (v is String) return v;
+    if (v is num) return v.toString();
+    return null;
+  }
 
   // ── AI output character sanitization ────────────────────────────────────
   //
@@ -91,7 +134,23 @@ class ResumeSanitizer {
   // (non-stub) experience entries that confidently describe the same
   // real-world role recorded twice across documents/chunks, which
   // discardBareDuplicateExperience deliberately leaves alone.
-  static const int currentSanitizationVersion = 4;
+  // v5: mergeCrossDocumentDuplicateRoles now also catches a single
+  // incomplete "award date" (no end date, not current) that falls within
+  // or near a same-title/company entry's range, or two same-title/company
+  // entries that each carry the same single incomplete date (e.g. a JST
+  // reporting the identical "Dates Held" value under two skill-level
+  // entries for one duty title) — real cases a strict interior-overlap
+  // check let through. deduplicateEducation now also refuses to silently
+  // pick a winner when two COMPLETED entries in a cluster genuinely
+  // disagree on GPA/field of study (as opposed to the already-handled
+  // completed-vs-in-progress case), flagging them instead.
+  // v6: extractYear/parseApproxDate now recognize compact "YYYYMMDD" dates
+  // (e.g. a DA-638's "20181025") — previously invisible to both, since \b
+  // never matches inside an unbroken digit run. Real DA-638 extractions
+  // commonly use this shape, so mergeCrossDocumentDuplicateRoles' date-
+  // overlap check (dateRangesOverlap, built on extractYear) may now confirm
+  // overlaps it previously missed entirely on already-stored resumes.
+  static const int currentSanitizationVersion = 6;
 
   // ── Fallback keyword lists (used only when entryType/certType is missing) ──
 
@@ -105,6 +164,22 @@ class ResumeSanitizer {
     'training command',
     'institute',
     'certificate program',
+  ];
+
+  /// Job-TITLE patterns (as opposed to company-name patterns above)
+  /// indicating the entry describes a trainee/student role rather than paid
+  /// employment — used only when an experience entry has no entryType.
+  /// General title-naming convention across fields (apprenticeships,
+  /// internships, military initial-qualification courses), not a
+  /// military-specific list: a Soldier Talent Profile listing a duty title
+  /// of "RA Trainee" for an initial qualification course is judged the same
+  /// way as a civilian "Sales Intern" or "Apprentice Electrician" title.
+  static const List<String> fallbackTrainingTitlePatterns = [
+    'trainee',
+    'recruit',
+    'cadet',
+    'apprentice',
+    'intern',
   ];
 
   /// Institution names matching these patterns indicate a non-degree
@@ -153,18 +228,347 @@ class ResumeSanitizer {
     'intro to',
   ];
 
+  // ── Source document type & field-level priority ─────────────────────────
+  //
+  // Different military document types are authoritative for different
+  // fields: an STP's assignment-history table is the system-of-record for
+  // exact duty dates/station, an NCOER's Part IV bullets are the most
+  // detailed personal narrative, and a JST's course list is the definitive
+  // source for training. When the same role is recorded across multiple
+  // uploaded documents (see mergeCrossDocumentDuplicateRoles below) and two
+  // sides disagree on a field, this priority order breaks the tie instead
+  // of an arbitrary heuristic (e.g. "whichever file was processed first").
+  // Only applies when both sides report a KNOWN, DIFFERENT document type —
+  // a single-file upload, or any entry an extraction call didn't tag,
+  // always falls through to the existing heuristic unchanged.
+
+  /// Mirrors the "documentType" values the extraction prompt asks Claude to
+  /// self-report (see _kEntryClassificationRules' Document Type rule) —
+  /// 'other' and anything unrecognized/missing parse to null, which the
+  /// priority lookups below treat as "unknown, don't use for tie-breaking".
+  static SourceDocType? parseSourceDocType(String? raw) {
+    switch (raw?.toLowerCase().trim()) {
+      case 'stp':
+        return SourceDocType.stp;
+      case 'ncoer':
+        return SourceDocType.ncoer;
+      case 'jst':
+        return SourceDocType.jst;
+      case 'transcript':
+        return SourceDocType.transcript;
+      case 'civilian_resume':
+        return SourceDocType.civilianResume;
+      case 'award_recommendation':
+        return SourceDocType.awardRecommendation;
+      case 'equipment_qualification':
+        return SourceDocType.equipmentQualification;
+      case 'training_certificate':
+        return SourceDocType.trainingCertificate;
+      default:
+        return null;
+    }
+  }
+
+  /// Duty dates and duty station: the STP's assignment table is the
+  /// system-of-record; an NCOER's rating-period dates are usually close but
+  /// secondary; a JST's "Dates Held" field is the least precise of the
+  /// three (see resume_sanitizer's date-parsing comments elsewhere).
+  /// Each inner list is one priority TIER — types sharing a tier are peers
+  /// (neither outranks the other; see [_preferredSide]).
+  static const List<List<SourceDocType>> _dateStationPriority = [
+    [SourceDocType.stp],
+    [SourceDocType.ncoer],
+    [SourceDocType.jst],
+  ];
+
+  /// Duty narrative / bullet content: an NCOER's Part IV comments are
+  /// personal, achievement-level detail; a JST's MOS description is generic
+  /// (synthesized into bullets, not copied verbatim — see the JST parsing
+  /// rule); an STP has no narrative field at all.
+  ///
+  /// Stage 8: awardRecommendation (a DA Form 638-shaped document) shares
+  /// the top tier with ncoer rather than being ranked below it — real
+  /// testing showed award citations are often MORE detailed and quantified
+  /// than NCOER bullets for the same period, so neither should silently
+  /// outrank the other here. This only affects which side donates
+  /// title/company identity text on a genuine disagreement — bullet
+  /// content from both sides is unioned in [_mergeTwoRoles] regardless of
+  /// tier, so award-recommendation and NCOER narrative for the same role
+  /// always both survive into the merged entry.
+  static const List<List<SourceDocType>> _dutyNarrativePriority = [
+    [SourceDocType.ncoer, SourceDocType.awardRecommendation],
+    [SourceDocType.jst],
+    [SourceDocType.stp],
+  ];
+
+  /// Degree/education records: an academic transcript is the authoritative
+  /// source; an STP's civilian-education field is usually a shorter
+  /// self-reported summary; an NCOER rarely carries education detail at all.
+  static const List<List<SourceDocType>> _educationPriority = [
+    [SourceDocType.transcript],
+    [SourceDocType.stp],
+    [SourceDocType.ncoer],
+  ];
+
+  /// Returns the higher-priority side of [a] vs [b] per [tiers] ('a', 'b'),
+  /// or null if either side is unknown/missing, both share the same type,
+  /// or both types fall in the same priority TIER (peers — nothing to break
+  /// a tie with) — callers fall back to their existing heuristic in any of
+  /// these cases.
+  static String? _preferredSide(
+    List<List<SourceDocType>> tiers,
+    SourceDocType? a,
+    SourceDocType? b,
+  ) {
+    if (a == null || b == null || a == b) return null;
+    final ia = tiers.indexWhere((tier) => tier.contains(a));
+    final ib = tiers.indexWhere((tier) => tier.contains(b));
+    if (ia == -1 || ib == -1 || ia == ib) return null;
+    return ia < ib ? 'a' : 'b';
+  }
+
+  /// Public wrapper over [_dateStationPriority] for callers outside this
+  /// file that need to break a tie between two documents' reported CURRENT
+  /// address/location by source authority — e.g. picking which of two
+  /// disagreeing contact addresses (home-of-record vs. current duty
+  /// station) to pre-select as the default in a conflict prompt. Same
+  /// authority order as duty-station resolution ([_mergeTwoRoles]): an
+  /// STP's assignment record outranks an NCOER's rating-period address,
+  /// which outranks a JST's. Returns 'a', 'b', or null exactly like
+  /// [_preferredSide] — null when either side is unknown or they tie.
+  static String? preferredCurrentLocationSide(
+    SourceDocType? a,
+    SourceDocType? b,
+  ) =>
+      _preferredSide(_dateStationPriority, a, b);
+
+  // ── Address/location normalization (home-of-record vs. duty station) ────
+  //
+  // Two source documents can each report a complete, genuine, but different
+  // address (e.g. a home-of-record mailing address vs. a current duty
+  // station). Distinguishing that from a mere formatting difference ("Ft
+  // Benning, GA" vs. "Fort Benning, GA", or "CO" vs. "Colorado") needs a
+  // best-effort normalization pass, not exact string equality — the same
+  // heuristic-fuzzy-matching philosophy as [companiesAreLikelyTheSame]
+  // above, not an exhaustive gazetteer.
+
+  static const Map<String, String> _usStateAbbreviations = {
+    'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR',
+    'california': 'CA', 'colorado': 'CO', 'connecticut': 'CT',
+    'delaware': 'DE', 'florida': 'FL', 'georgia': 'GA', 'hawaii': 'HI',
+    'idaho': 'ID', 'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA',
+    'kansas': 'KS', 'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME',
+    'maryland': 'MD', 'massachusetts': 'MA', 'michigan': 'MI',
+    'minnesota': 'MN', 'mississippi': 'MS', 'missouri': 'MO',
+    'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV',
+    'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM',
+    'new york': 'NY', 'north carolina': 'NC', 'north dakota': 'ND',
+    'ohio': 'OH', 'oklahoma': 'OK', 'oregon': 'OR', 'pennsylvania': 'PA',
+    'rhode island': 'RI', 'south carolina': 'SC', 'south dakota': 'SD',
+    'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT', 'vermont': 'VT',
+    'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV',
+    'wisconsin': 'WI', 'wyoming': 'WY', 'district of columbia': 'DC',
+    'puerto rico': 'PR', 'guam': 'GU',
+  };
+
+  /// Canonicalizes a state name or abbreviation to its 2-letter code (e.g.
+  /// "Colorado" and "CO" both become "CO") so the two forms never look like
+  /// a conflict. Anything unrecognized (a non-US region, a typo) falls back
+  /// to lowercase/trim so it's still compared consistently, just without
+  /// the abbreviation-awareness.
+  static String normalizeStateToCode(String raw) {
+    final trimmed = raw.trim().toLowerCase();
+    if (trimmed.isEmpty) return '';
+    final known = _usStateAbbreviations[trimmed];
+    if (known != null) return known;
+    if (RegExp(r'^[a-z]{2}$').hasMatch(trimmed)) return trimmed.toUpperCase();
+    return trimmed;
+  }
+
+  /// Normalizes a city name for comparison: lowercase, strips punctuation,
+  /// collapses whitespace, and expands a short list of common whole-word
+  /// prefixes military/civilian records both use interchangeably ("Ft" /
+  /// "Fort", "St" / "Saint", "Mt" / "Mount") so "Ft Benning" and "Fort
+  /// Benning" compare equal.
+  static String normalizeCityForComparison(String raw) {
+    var s = raw.trim().toLowerCase().replaceAll(RegExp(r'[.,]'), '');
+    s = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+    s = s.replaceAll(RegExp(r'\bft\b'), 'fort');
+    s = s.replaceAll(RegExp(r'\bst\b'), 'saint');
+    s = s.replaceAll(RegExp(r'\bmt\b'), 'mount');
+    return s;
+  }
+
+  /// True if two (city, state) pairs represent the SAME real-world location
+  /// after normalization — the check [_mergeResults]-style location-
+  /// conflict detection uses to avoid flagging pure formatting differences
+  /// ("CO" vs "Colorado", "Ft Benning, GA" vs "Fort Benning, GA") as a
+  /// genuine conflict.
+  static bool isSameLocation(
+    String cityA,
+    String stateA,
+    String cityB,
+    String stateB,
+  ) =>
+      normalizeCityForComparison(cityA) == normalizeCityForComparison(cityB) &&
+      normalizeStateToCode(stateA) == normalizeStateToCode(stateB);
+
+  /// Detects a genuine location conflict among files that each report a
+  /// COMPLETE (city, state) pair for the resume's contact address — e.g. a
+  /// home-of-record mailing address vs. a current duty station. [addresses]
+  /// is one entry per file that provided both fields:
+  /// `{sourceFile, city, state, documentType}` (documentType nullable/
+  /// unrecognized is fine — see [parseSourceDocType]).
+  ///
+  /// Returns null when there's nothing to resolve — fewer than 2 files, or
+  /// every file's address is the SAME after [isSameLocation] normalization
+  /// (a pure formatting difference, not a real conflict). The caller should
+  /// leave contact.city/contact.state exactly as ordinary per-field
+  /// handling would in that case.
+  ///
+  /// Otherwise returns one entry per DISTINCT normalized address:
+  /// `{city, state, sourceFiles: List<String>, isPreferred: bool}` — the
+  /// pre-selected default (`isPreferred: true`, exactly one across the
+  /// whole result) is whichever address has the highest-authority document
+  /// type per [preferredCurrentLocationSide] (STP > NCOER > JST), falling
+  /// back to whichever file appears first in [addresses] when doc type
+  /// can't break the tie. This is a pre-selection only — the caller must
+  /// still require explicit user confirmation before applying either one.
+  static List<Map<String, dynamic>>? detectLocationConflict(
+    List<Map<String, dynamic>> addresses,
+  ) {
+    if (addresses.length < 2) return null;
+
+    final groups = <String, List<Map<String, dynamic>>>{};
+    for (final addr in addresses) {
+      final city = addr['city'] as String;
+      final state = addr['state'] as String;
+      final key = '${normalizeCityForComparison(city)}|'
+          '${normalizeStateToCode(state)}';
+      groups.putIfAbsent(key, () => []).add(addr);
+    }
+
+    if (groups.length < 2) return null;
+
+    // Pick the pre-selected default by source-document authority, falling
+    // back to whichever file appears first in [addresses] (the existing
+    // scalar-conflict tiebreak convention) when doc type doesn't decide it.
+    var best = addresses.first;
+    var bestType = parseSourceDocType(best['documentType'] as String?);
+    for (final addr in addresses.skip(1)) {
+      final addrType = parseSourceDocType(addr['documentType'] as String?);
+      if (preferredCurrentLocationSide(bestType, addrType) == 'b') {
+        best = addr;
+        bestType = addrType;
+      }
+    }
+    final bestFile = best['sourceFile'] as String;
+
+    return groups.values
+        .map((group) => {
+              'city': group.first['city'],
+              'state': group.first['state'],
+              'sourceFiles':
+                  group.map((g) => g['sourceFile'] as String).toList(),
+              'isPreferred':
+                  group.any((g) => g['sourceFile'] == bestFile),
+            })
+        .toList();
+  }
+
+  /// Builds the ContactInfo-shaped sub-field map (e.g. `{'city': ...,
+  /// 'firstName': ...}`) from a list of ACCEPTED mapping rows — shared by
+  /// DocumentUploadScreen's two apply-time call sites
+  /// (_buildPrefillFromMappings for first-time setup,
+  /// _writeMappingsToSections for uploading into an existing resume) so the
+  /// synthetic `contact.location` conflict row (see [detectLocationConflict])
+  /// is split back into real `city`/`state` values identically at both
+  /// sites, from one shared implementation, rather than two independently
+  /// maintained copies that could silently drift apart. [acceptedMappings]
+  /// is the full accepted-mappings list — fields that don't start with
+  /// `contact.` are ignored, so callers don't need to pre-filter.
+  static Map<String, dynamic> contactMapFromAcceptedMappings(
+    List<Map<String, dynamic>> acceptedMappings,
+  ) {
+    final contactMap = <String, dynamic>{};
+    for (final m in acceptedMappings) {
+      final field = m['field'] as String;
+      if (field == 'contact.location') {
+        // Split using the exact values the conflict row was built from —
+        // never a re-parse of the "City, State" display string.
+        contactMap['city'] = m['_locationCity'];
+        contactMap['state'] = m['_locationState'];
+      } else if (field.startsWith('contact.')) {
+        contactMap[field.substring('contact.'.length)] = m['suggestedValue'];
+      }
+    }
+    return contactMap;
+  }
+
+  // ── Bullet object normalization ──────────────────────────────────────────
+
+  /// Normalizes one raw bullet value from Claude's extraction JSON — the
+  /// new object shape `{"text": ..., "hasQuantifiableData": ...}`, or a bare
+  /// string (a malformed deviation from the current prompt, or data from a
+  /// call site that hasn't been touched by the object-shaped extraction
+  /// path) — into a consistent `{'text': String, 'hasQuantifiableData':
+  /// bool, 'metricRequested': bool}` map. Every bullet-handling function
+  /// below operates on this raw map shape, matching the rest of the
+  /// extraction pipeline (which works with decoded JSON throughout, only
+  /// becoming typed BulletEntry objects once ExperienceEntry.fromJson runs
+  /// at the Hive-read boundary). A bare string defaults to
+  /// hasQuantifiableData: false — "not yet evaluated," same convention
+  /// BulletEntry.fromJson uses for legacy stored data.
+  static Map<String, dynamic> normalizeBulletMap(dynamic raw) {
+    if (raw is Map) {
+      return {
+        'text': raw['text']?.toString() ?? '',
+        'hasQuantifiableData': raw['hasQuantifiableData'] as bool? ?? true,
+        'metricRequested': raw['metricRequested'] as bool? ?? false,
+      };
+    }
+    return {
+      'text': raw?.toString() ?? '',
+      'hasQuantifiableData': false,
+      'metricRequested': false,
+    };
+  }
+
+  /// Normalizes a raw `bullets` list value (however it's shaped) into
+  /// bullet-object maps via [normalizeBulletMap].
+  static List<Map<String, dynamic>> normalizeBulletList(dynamic rawBullets) {
+    return (rawBullets as List<dynamic>? ?? [])
+        .map(normalizeBulletMap)
+        .toList();
+  }
+
   // ── Bullet cap ───────────────────────────────────────────────────────────
 
-  /// Caps bullets per experience entry in the master resume. When over the
-  /// cap, keeps the [max] longest bullets — length is a simple, deterministic
-  /// proxy for the specificity the app's extraction guidance already asks
-  /// for (numbers, outcomes, scope) — while preserving the original relative
-  /// order of the bullets that survive, so the entry still reads naturally.
-  /// Entries at or under the cap are returned untouched.
-  static List<String> capBullets(List<String> bullets, {int max = 6}) {
+  /// Caps bullets per experience entry. When over the cap, keeps the [max]
+  /// longest bullets (by text length — a simple, deterministic proxy for
+  /// the specificity the app's extraction guidance already asks for:
+  /// numbers, outcomes, scope) — while preserving the original relative
+  /// order of the bullets that survive, so the entry still reads
+  /// naturally. Entries at or under the cap are returned untouched.
+  /// Operates on bullet-object maps (see [normalizeBulletMap]), not plain
+  /// strings, so a kept bullet's hasQuantifiableData flag survives the cap
+  /// along with its text.
+  ///
+  /// Stage 9 (2026-07-28): Master Resumes are exhaustive with no page
+  /// limit, so this must NEVER be called against Master Resume data —
+  /// only against Tailored Resume paths, which legitimately target a
+  /// short bullet list (one page, two-page max). See the doc comments on
+  /// CloudflareWorkerService.parseFieldMappings,
+  /// DocumentUploadScreen._resolvePendingDecision, and
+  /// ResumeMigrationService._sanitizeResume for how each of this
+  /// function's call sites respects that split.
+  static List<Map<String, dynamic>> capBullets(
+      List<Map<String, dynamic>> bullets,
+      {int max = 6}) {
     if (bullets.length <= max) return bullets;
+    String textOf(int i) => bullets[i]['text'] as String? ?? '';
     final byLength = List<int>.generate(bullets.length, (i) => i)
-      ..sort((a, b) => bullets[b].length.compareTo(bullets[a].length));
+      ..sort((a, b) => textOf(b).length.compareTo(textOf(a).length));
     final keepIndices = byLength.take(max).toSet();
     return [
       for (int i = 0; i < bullets.length; i++)
@@ -243,7 +647,7 @@ class ResumeSanitizer {
   /// "Expected 2027", "Anticipated May 2026", etc.) — general date-language
   /// detection, not a field-specific keyword list.
   static bool hasEducationCompletionDate(Map<String, dynamic> entry) {
-    final grad = (entry['graduationYear'] as String? ?? '').trim();
+    final grad = (coerceToString(entry['graduationYear']) ?? '').trim();
     if (grad.isEmpty) return false;
     final lower = grad.toLowerCase();
     const nonCompletionMarkers = [
@@ -255,25 +659,80 @@ class ResumeSanitizer {
 
   static int _educationDetailScore(Map<String, dynamic> e) {
     var score = 0;
-    if ((e['gpa'] as String? ?? '').isNotEmpty) score++;
+    if ((coerceToString(e['gpa']) ?? '').isNotEmpty) score++;
     if ((e['fieldOfStudy'] as String? ?? '').isNotEmpty) score++;
-    if ((e['honors'] as String? ?? '').isNotEmpty) score++;
+    if ((coerceToString(e['honors']) ?? '').isNotEmpty) score++;
     if ((e['degree'] as String? ?? '').isNotEmpty) score++;
     if (hasEducationCompletionDate(e)) score++;
     return score;
   }
 
+  /// True if two or more COMPLETED entries in a cluster genuinely disagree
+  /// on GPA or field of study — as opposed to the already-handled case of a
+  /// completed entry outranking an in-progress/bare sibling, where a
+  /// differing GPA is expected (a snapshot mid-program vs. the final
+  /// figure) and NOT a conflict. This only fires when there's more than one
+  /// completed record to disagree with each other in the first place.
+  static bool _hasGenuineEducationConflict(
+      List<Map<String, dynamic>> completed) {
+    if (completed.length < 2) return false;
+    String? gpa;
+    String? field;
+    for (final e in completed) {
+      final g = (coerceToString(e['gpa']) ?? '').trim();
+      if (g.isNotEmpty) {
+        if (gpa != null && gpa != g) return true;
+        gpa = g;
+      }
+      final f = (e['fieldOfStudy'] as String? ?? '').trim().toLowerCase();
+      if (f.isNotEmpty) {
+        if (field != null && field != f) return true;
+        field = f;
+      }
+    }
+    return false;
+  }
+
   /// Resolves a cluster of entries believed to represent the SAME degree
-  /// program to a single entry: a completed entry always wins (regardless
-  /// of GPA conflicts with an in-progress sibling); with no completed
-  /// entry in the cluster, keeps whichever is most detailed.
-  static Map<String, dynamic> _resolveEducationCluster(
+  /// program. Normally collapses to a single entry: a completed entry
+  /// always wins over an in-progress/bare sibling (regardless of a GPA
+  /// difference — an in-progress snapshot is expected to differ from the
+  /// final figure, not a real conflict); with no completed entry in the
+  /// cluster, keeps whichever is most detailed — ties broken by source
+  /// document authority when known (a transcript outranks an STP's
+  /// self-reported summary, which outranks an NCOER — see
+  /// [_educationPriority]) before falling back to entry order. When two or
+  /// more COMPLETED entries genuinely disagree on GPA or field of study,
+  /// this is a real conflict between two supposedly-final records — rather
+  /// than silently picking one, every completed entry in the disagreement
+  /// is returned, each annotated with `educationConflict: true`, so the
+  /// user resolves it instead of an guess being baked into the saved
+  /// resume. Source priority intentionally does NOT auto-resolve this
+  /// conflict case — the existing conflict UI still shows every candidate
+  /// with no default.
+  static List<Map<String, dynamic>> _resolveEducationCluster(
       List<Map<String, dynamic>> cluster) {
-    if (cluster.length == 1) return cluster.first;
+    if (cluster.length == 1) return cluster;
     final completed = cluster.where(hasEducationCompletionDate).toList();
+    if (_hasGenuineEducationConflict(completed)) {
+      return completed
+          .map((e) => <String, dynamic>{...e, 'educationConflict': true})
+          .toList();
+    }
     final pool = completed.isNotEmpty ? completed : cluster;
-    return pool.reduce((best, e) =>
-        _educationDetailScore(e) > _educationDetailScore(best) ? e : best);
+    return [
+      pool.reduce((best, e) {
+        final scoreBest = _educationDetailScore(best);
+        final scoreE = _educationDetailScore(e);
+        if (scoreE != scoreBest) return scoreE > scoreBest ? e : best;
+        final side = _preferredSide(
+          _educationPriority,
+          parseSourceDocType(best['_sourceDocType'] as String?),
+          parseSourceDocType(e['_sourceDocType'] as String?),
+        );
+        return side == 'b' ? e : best;
+      })
+    ];
   }
 
   /// Deduplicates education entries by institution, resolving each
@@ -314,7 +773,7 @@ class ResumeSanitizer {
               .where((e) =>
                   normalizeDegree(e['degree'] as String? ?? '') == degree)
               .toList();
-          result.add(_resolveEducationCluster(cluster));
+          result.addAll(_resolveEducationCluster(cluster));
         }
         result.addAll(group.where(
             (e) => normalizeDegree(e['degree'] as String? ?? '').isEmpty));
@@ -323,7 +782,7 @@ class ResumeSanitizer {
 
       // Zero or one named degree at this institution — every entry
       // (named or bare) is a duplicate candidate for that one degree.
-      result.add(_resolveEducationCluster(group));
+      result.addAll(_resolveEducationCluster(group));
     }
 
     return result;
@@ -354,8 +813,8 @@ class ResumeSanitizer {
         byNorm[norm] = map;
       } else {
         final existing = byNorm[norm]!;
-        final existingDate = existing['dateEarned'] as String? ?? '';
-        final newDate = map['dateEarned'] as String? ?? '';
+        final existingDate = coerceToString(existing['dateEarned']) ?? '';
+        final newDate = coerceToString(map['dateEarned']) ?? '';
         final existingName = (existing['name'] as String? ?? '');
         final newName = (map['name'] as String? ?? '');
         // Prefer entry that has a date; if both do, prefer the longer name.
@@ -374,7 +833,7 @@ class ResumeSanitizer {
     final result = <dynamic>[];
     for (final entry in byNorm.values) {
       final issuer = (entry['issuer'] as String? ?? '').toLowerCase().trim();
-      final date = (entry['dateEarned'] as String? ?? '').trim();
+      final date = (coerceToString(entry['dateEarned']) ?? '').trim();
       if (issuer.isNotEmpty && date.isNotEmpty) {
         final key = '$issuer|$date';
         if (!seenIssuerDate.add(key)) continue; // duplicate issuer+date
@@ -479,6 +938,16 @@ class ResumeSanitizer {
 
   static int? extractYear(String? s) {
     if (s == null || s.isEmpty) return null;
+    // Compact "YYYYMMDD" (e.g. a DA-638's "20181025") is an unbroken digit
+    // run — \b never matches between two digits, so the general regex below
+    // can't see the year inside it. Checked first, on the whole trimmed
+    // string, so it doesn't also swallow an 8-digit substring of something
+    // longer that isn't actually this shape.
+    final compact = RegExp(r'^(\d{4})(\d{2})(\d{2})$').firstMatch(s.trim());
+    if (compact != null) {
+      final y = int.parse(compact.group(1)!);
+      if (y >= 1900 && y <= 2099) return y;
+    }
     final match = RegExp(r'\b(19|20)\d{2}\b').firstMatch(s);
     return match != null ? int.tryParse(match.group(0)!) : null;
   }
@@ -495,12 +964,26 @@ class ResumeSanitizer {
   /// whatever precision the string actually supports (day, month, or
   /// year-only — defaulting missing month/day to the start of the period).
   /// Returns null if no year can be found at all. Covers the date shapes
-  /// this app's extraction actually produces: ISO ("2016-04-25"), the
+  /// this app's extraction actually produces: ISO ("2016-04-25"), compact
+  /// "YYYYMMDD" (a DA-638's period-of-award dates, e.g. "20181025"), the
   /// "DD-MMM-YYYY" style military records use ("06-JUN-2016"), "Mon YYYY" /
   /// "Month YYYY", and a bare "YYYY".
   static DateTime? parseApproxDate(String? s) {
     if (s == null || s.trim().isEmpty) return null;
     final trimmed = s.trim();
+
+    // Compact "YYYYMMDD" (e.g. a DA-638's "20181025") — see extractYear's
+    // comment on why this needs its own check rather than falling through
+    // to the general year-extraction path at the bottom of this method.
+    final compact = RegExp(r'^(\d{4})(\d{2})(\d{2})$').firstMatch(trimmed);
+    if (compact != null) {
+      final y = int.parse(compact.group(1)!);
+      final m = int.parse(compact.group(2)!);
+      final d = int.parse(compact.group(3)!);
+      if (y >= 1900 && y <= 2099 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+        return DateTime(y, m, d);
+      }
+    }
 
     final iso =
         RegExp(r'^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?$').firstMatch(trimmed);
@@ -572,11 +1055,11 @@ class ResumeSanitizer {
     final titleB = normalizeTitle(b['title'] as String? ?? '');
     if (titleA.isEmpty || titleA != titleB) return false;
 
-    final startA = a['startDate'] as String? ?? '';
-    final endA = a['endDate'] as String?;
+    final startA = coerceToString(a['startDate']) ?? '';
+    final endA = coerceToString(a['endDate']);
     final currentA = a['isCurrent'] as bool? ?? false;
-    final startB = b['startDate'] as String? ?? '';
-    final endB = b['endDate'] as String?;
+    final startB = coerceToString(b['startDate']) ?? '';
+    final endB = coerceToString(b['endDate']);
     final currentB = b['isCurrent'] as bool? ?? false;
 
     if (dateRangesOverlap(startA, endA, currentA, startB, endB, currentB)) {
@@ -610,36 +1093,124 @@ class ResumeSanitizer {
   }
 
   /// True for the HIGH-confidence half of [isLikelyCrossDocumentDuplicateRole]
-  /// only — same fuzzy-matched company, same normalized title, and a real
-  /// date-range overlap (not just "one side has an incomplete date", which
-  /// is too weak a signal to act on automatically; see that function's
-  /// "incomplete-date fallback" comment). This is the bar for automatically
-  /// merging two entries rather than merely flagging them for the user to
-  /// review via [hasCrossDocumentDuplicateRoles].
+  /// only — same fuzzy-matched company (or both sides blank — see below),
+  /// same normalized title, and dates confidently describing the SAME
+  /// assignment (see [_isConfidentlySameAssignmentDates]). This is the bar
+  /// for automatically merging two entries rather than merely flagging them
+  /// for the user to review via [hasCrossDocumentDuplicateRoles].
   static bool _isConfidentCrossDocumentDuplicateRole(
     Map<String, dynamic> a,
     Map<String, dynamic> b,
   ) {
-    if (!companiesAreLikelyTheSame(
-        a['company'] as String? ?? '', b['company'] as String? ?? '')) {
-      return false;
-    }
+    final companyA = a['company'] as String? ?? '';
+    final companyB = b['company'] as String? ?? '';
+    // Both sides blank is treated as a match, not a mismatch: a
+    // military-experience-style entry (e.g. a JST MOS record) often has no
+    // per-entry employer field at all, so requiring a company match would
+    // never let two identically-titled entries from that kind of source
+    // merge. Two full, populated-but-different company strings still fail
+    // the fuzzy check as before.
+    final companiesMatch = companiesAreLikelyTheSame(companyA, companyB) ||
+        (companyA.trim().isEmpty && companyB.trim().isEmpty);
+    if (!companiesMatch) return false;
+
     final titleA = normalizeTitle(a['title'] as String? ?? '');
     final titleB = normalizeTitle(b['title'] as String? ?? '');
     if (titleA.isEmpty || titleA != titleB) return false;
 
-    return dateRangesOverlap(
-      a['startDate'] as String? ?? '',
-      a['endDate'] as String?,
+    return _isConfidentlySameAssignmentDates(
+      coerceToString(a['startDate']) ?? '',
+      coerceToString(a['endDate']),
       a['isCurrent'] as bool? ?? false,
-      b['startDate'] as String? ?? '',
-      b['endDate'] as String?,
+      coerceToString(b['startDate']) ?? '',
+      coerceToString(b['endDate']),
       b['isCurrent'] as bool? ?? false,
     );
   }
 
+  /// True if [a] and [b]'s dates confidently describe the SAME assignment —
+  /// either a genuine interior overlap (see [dateRangesOverlap], which
+  /// deliberately excludes two full ranges that merely touch at an
+  /// endpoint, since that's the signature of a real promotion/re-hire
+  /// sequence), OR at least one side is a single incomplete "award/
+  /// completion date" (no end date, not current — the shape a JST's "Dates
+  /// Held" field or an STP assignment-table row often takes) that falls
+  /// within, or within a year of, the other side's span. Real source
+  /// documents frequently report the same assignment as a single award date
+  /// in one section and a full range in another — or the identical single
+  /// date twice, e.g. a JST listing the same duty title under two MOS
+  /// skill-level entries, both stamped with the same "Dates Held" value.
+  /// Two full date RANGES on both sides are never merged here beyond what
+  /// [dateRangesOverlap] already allows — that promotion-sequence
+  /// protection is preserved exactly as before.
+  static bool _isConfidentlySameAssignmentDates(
+    String startA, String? endA, bool isCurrentA,
+    String startB, String? endB, bool isCurrentB,
+  ) {
+    if (dateRangesOverlap(
+        startA, endA, isCurrentA, startB, endB, isCurrentB)) {
+      return true;
+    }
+
+    final aIncomplete = !isCurrentA && (endA == null || endA.isEmpty);
+    final bIncomplete = !isCurrentB && (endB == null || endB.isEmpty);
+    // Two fully-dated (or current) ranges that don't interior-overlap are
+    // left to dateRangesOverlap's judgment alone — a touching/gapped pair
+    // of real ranges is a promotion or re-hire sequence, not a duplicate.
+    if (!aIncomplete && !bIncomplete) return false;
+
+    final sa = parseApproxDate(startA);
+    final sb = parseApproxDate(startB);
+    if (sa == null || sb == null) return false;
+
+    const oneYear = Duration(days: 366);
+
+    if (aIncomplete && bIncomplete) {
+      // Both sides are single award-date-shaped entries — closeness of the
+      // single date is the only signal available.
+      return sa.difference(sb).abs() <= oneYear;
+    }
+
+    // Exactly one side is a single date — confident only if it falls
+    // within (or just outside, allowing for imprecise source dates) the
+    // other side's full range.
+    final singleDate = aIncomplete ? sa : sb;
+    final rangeStart = aIncomplete ? sb : sa;
+    final rangeEnd = aIncomplete
+        ? (isCurrentB ? DateTime.now() : (parseApproxDate(endB) ?? rangeStart))
+        : (isCurrentA ? DateTime.now() : (parseApproxDate(endA) ?? rangeStart));
+
+    final lowerBound = rangeStart.subtract(oneYear);
+    final upperBound = rangeEnd.add(oneYear);
+    return !singleDate.isBefore(lowerBound) && !singleDate.isAfter(upperBound);
+  }
+
   static String _normalizeBulletForDedup(String s) =>
       s.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  /// Returns [entry]'s own contributing-range history: if it already has a
+  /// `_contributingRanges` list (because it's itself the product of a prior
+  /// [_mergeTwoRoles] round, in a chained 3+-way merge), that list is
+  /// returned as-is; otherwise a fresh single-element list is synthesized
+  /// from [entry]'s own (pre-merge) startDate/endDate/isCurrent/bullets.
+  /// [hasBullets] is fixed at whichever this leaf entry itself reported —
+  /// it is never recomputed from the merged whole, so later rounds can't
+  /// retroactively make an originally-bulletless source look covered.
+  /// See [TimelineCoverageGap] / detectIntraEntryGaps for what this feeds.
+  static List<Map<String, dynamic>> _contributingRangesOf(
+      Map<String, dynamic> entry) {
+    final existing = entry['_contributingRanges'] as List<dynamic>?;
+    if (existing != null) return existing.cast<Map<String, dynamic>>();
+    final bullets = entry['bullets'] as List<dynamic>?;
+    return [
+      {
+        'start': entry['startDate'],
+        'end': entry['endDate'],
+        'isCurrent': entry['isCurrent'] as bool? ?? false,
+        'hasBullets': bullets != null && bullets.isNotEmpty,
+      }
+    ];
+  }
 
   /// Merges two SUBSTANTIVE (non-stub) experience entries believed to
   /// describe the same real-world role — see
@@ -649,34 +1220,58 @@ class ResumeSanitizer {
   /// start date, and keeps the latest end date (or "current", if either
   /// side is marked current — an ongoing role recorded from an older
   /// document is still ongoing). Prefers the more detailed side's title/
-  /// company/location text as the surviving entry's identity fields.
+  /// company text as the surviving entry's identity fields — by source
+  /// document authority when both sides report a known, different
+  /// [SourceDocType] (an NCOER's narrative outranks a JST's, which outranks
+  /// an STP's — see [_dutyNarrativePriority]), falling back to whichever
+  /// side has more bullets when doc type isn't known for either side. Duty
+  /// station is resolved the same way when both sides disagree (see
+  /// [_dateStationPriority]) — never silently loses one side's location
+  /// when only one side has it. Date range combination (earliest start,
+  /// latest end) is untouched by source priority — combining fragmentary
+  /// date coverage across documents is a deliberate widening strategy, not
+  /// a conflict pick, so it's left exactly as before.
   static Map<String, dynamic> _mergeTwoRoles(
     Map<String, dynamic> a,
     Map<String, dynamic> b,
   ) {
-    final aBullets = (a['bullets'] as List<dynamic>? ?? [])
-        .map((e) => e.toString())
-        .toList();
-    final bBullets = (b['bullets'] as List<dynamic>? ?? [])
-        .map((e) => e.toString())
-        .toList();
+    // Captured from the RAW, pre-merge a/b before bullets get unioned below
+    // — see _contributingRangesOf's doc comment for why hasBullets must be
+    // fixed at what each original leaf side reported, not recomputed later.
+    final contributingRanges = [
+      ..._contributingRangesOf(a),
+      ..._contributingRangesOf(b),
+    ];
+
+    final aBullets = normalizeBulletList(a['bullets']);
+    final bBullets = normalizeBulletList(b['bullets']);
 
     final seen = <String>{};
-    final mergedBullets = <String>[];
+    final mergedBullets = <Map<String, dynamic>>[];
     for (final bullet in [...aBullets, ...bBullets]) {
-      final key = _normalizeBulletForDedup(bullet);
+      final key = _normalizeBulletForDedup(bullet['text'] as String? ?? '');
       if (key.isEmpty || !seen.add(key)) continue;
       mergedBullets.add(bullet);
     }
 
-    // Whichever side has more bullets is treated as the more complete
-    // record and donates its identity fields (title casing, company
-    // formatting, location) to the merged entry.
-    final primary = aBullets.length >= bBullets.length ? a : b;
-    final secondary = identical(primary, a) ? b : a;
+    final docTypeA = parseSourceDocType(a['_sourceDocType'] as String?);
+    final docTypeB = parseSourceDocType(b['_sourceDocType'] as String?);
+    final narrativeSide =
+        _preferredSide(_dutyNarrativePriority, docTypeA, docTypeB);
 
-    final startA = extractYear(a['startDate'] as String?);
-    final startB = extractYear(b['startDate'] as String?);
+    // The higher-authority document for duty narrative donates identity
+    // fields (title casing, company formatting) when doc type is known for
+    // both sides; otherwise whichever side has more bullets is treated as
+    // the more complete record, as before.
+    final Map<String, dynamic> primary;
+    if (narrativeSide != null) {
+      primary = narrativeSide == 'a' ? a : b;
+    } else {
+      primary = aBullets.length >= bBullets.length ? a : b;
+    }
+
+    final startA = extractYear(coerceToString(a['startDate']));
+    final startB = extractYear(coerceToString(b['startDate']));
     final earlierStartEntry =
         (startA != null && (startB == null || startA <= startB)) ? a : b;
 
@@ -686,29 +1281,49 @@ class ResumeSanitizer {
 
     String? mergedEndDate;
     if (!isCurrent) {
-      final endA = extractYear(a['endDate'] as String?);
-      final endB = extractYear(b['endDate'] as String?);
+      final endA = extractYear(coerceToString(a['endDate']));
+      final endB = extractYear(coerceToString(b['endDate']));
       if (endA == null) {
-        mergedEndDate = b['endDate'] as String?;
+        mergedEndDate = coerceToString(b['endDate']);
       } else if (endB == null) {
-        mergedEndDate = a['endDate'] as String?;
+        mergedEndDate = coerceToString(a['endDate']);
       } else {
-        mergedEndDate =
-            endA >= endB ? a['endDate'] as String? : b['endDate'] as String?;
+        mergedEndDate = endA >= endB
+            ? coerceToString(a['endDate'])
+            : coerceToString(b['endDate']);
       }
+    }
+
+    final rawLocationA = (a['location'] as String? ?? '').trim();
+    final rawLocationB = (b['location'] as String? ?? '').trim();
+    final String mergedLocation;
+    if (rawLocationA.isNotEmpty &&
+        rawLocationB.isNotEmpty &&
+        rawLocationA.toLowerCase() != rawLocationB.toLowerCase()) {
+      // Genuine disagreement (e.g. an older assignment's station vs. a
+      // newer one) — the higher-authority document wins when doc type is
+      // known for both sides, else fall back to the identity donor chosen
+      // above (unchanged from before this field existed).
+      final stationSide =
+          _preferredSide(_dateStationPriority, docTypeA, docTypeB);
+      mergedLocation = stationSide == null
+          ? (primary['location'] as String? ?? '')
+          : (stationSide == 'a' ? rawLocationA : rawLocationB);
+    } else {
+      // Only one side has a value (or they agree) — never drop it.
+      mergedLocation = rawLocationA.isNotEmpty ? rawLocationA : rawLocationB;
     }
 
     return <String, dynamic>{
       ...primary,
       'title': primary['title'],
       'company': primary['company'],
-      'location': (primary['location'] as String? ?? '').isNotEmpty
-          ? primary['location']
-          : secondary['location'],
+      'location': mergedLocation,
       'startDate': earlierStartEntry['startDate'],
       'endDate': mergedEndDate,
       'isCurrent': isCurrent,
       'bullets': mergedBullets,
+      '_contributingRanges': contributingRanges,
     };
   }
 
@@ -751,6 +1366,186 @@ class ResumeSanitizer {
     return result;
   }
 
+  // ── Timeline coverage gap detection (Stage 3) ────────────────────────────
+  //
+  // A real employment date gap can go unnoticed because extraction works
+  // per-document rather than against one unified timeline. This checks the
+  // FINAL merged experience list (post mergeCrossDocumentDuplicateRoles) for
+  // two distinct failure shapes:
+  //   - betweenEntries: dead time between two separate, adjacent jobs.
+  //   - withinEntry: a single entry's date range was widened by merging
+  //     (see _mergeTwoRoles/_contributingRanges) beyond what any of its
+  //     contributing bullets actually narrate — e.g. an STP's current-
+  //     assignment dates widening a role whose only bullets come from a
+  //     narrower NCOER rating period.
+  // Pure Dart date arithmetic, no model call — deterministic and free,
+  // matching Stage 1/2's "mechanical first" approach. Gaps under
+  // [minGapDays] are never flagged (rounding/imprecision, not a real gap).
+
+  static const int minGapDays = 30;
+
+  /// [entry]'s own (start, end) span — end is "now" if current, else the
+  /// parsed endDate, falling back to start if endDate is missing/unparsable
+  /// (a single award-date-shaped entry, matching the convention used
+  /// elsewhere in this file). Null if startDate itself can't be parsed.
+  static ({DateTime start, DateTime end})? _entrySpan(
+      Map<String, dynamic> entry) {
+    final start = parseApproxDate(coerceToString(entry['startDate']));
+    if (start == null) return null;
+    final isCurrent = entry['isCurrent'] as bool? ?? false;
+    final end = isCurrent
+        ? DateTime.now()
+        : (parseApproxDate(coerceToString(entry['endDate'])) ?? start);
+    return (start: start, end: end);
+  }
+
+  /// Detects unexplained dead time between adjacent experience entries
+  /// (sorted by start date), treating any education/certification entry
+  /// whose own single date falls within the gap as plausible coverage (a
+  /// degree completed, or a certification earned, during what looks like a
+  /// job gap). This is a deliberately approximate signal — education/
+  /// certification entries only carry one point-in-time date in this app's
+  /// data model, not a range, so "coverage" here means "something notable
+  /// happened during this window," not a verified full-span explanation.
+  static List<TimelineCoverageGap> detectInterEntryGaps(
+    List<dynamic> experienceEntries,
+    List<dynamic> educationEntries,
+    List<dynamic> certificationEntries,
+  ) {
+    final spans = <({String id, DateTime start, DateTime end})>[];
+    for (final raw in experienceEntries) {
+      final entry = raw as Map<String, dynamic>;
+      final span = _entrySpan(entry);
+      if (span == null) continue;
+      spans.add((
+        id: entry['id'] as String? ?? '',
+        start: span.start,
+        end: span.end,
+      ));
+    }
+    if (spans.length < 2) return [];
+    spans.sort((a, b) => a.start.compareTo(b.start));
+
+    final coveringDates = <DateTime>[];
+    for (final raw in educationEntries) {
+      final d = parseApproxDate(
+          coerceToString((raw as Map<String, dynamic>)['graduationYear']));
+      if (d != null) coveringDates.add(d);
+    }
+    for (final raw in certificationEntries) {
+      final d = parseApproxDate(
+          coerceToString((raw as Map<String, dynamic>)['dateEarned']));
+      if (d != null) coveringDates.add(d);
+    }
+
+    final gaps = <TimelineCoverageGap>[];
+    for (var i = 0; i < spans.length - 1; i++) {
+      final prev = spans[i];
+      final next = spans[i + 1];
+      final gapStart = prev.end;
+      final gapEnd = next.start;
+      if (!gapEnd.isAfter(gapStart)) continue;
+      if (gapEnd.difference(gapStart).inDays < minGapDays) continue;
+      final covered = coveringDates
+          .any((d) => !d.isBefore(gapStart) && !d.isAfter(gapEnd));
+      if (covered) continue;
+      gaps.add(TimelineCoverageGap(
+        id: 'gap_between_${prev.id}_${next.id}',
+        startDate: gapStart,
+        endDate: gapEnd,
+        kind: TimelineGapKind.betweenEntries,
+        adjacentEntryIds: [prev.id, next.id],
+      ));
+    }
+    return gaps;
+  }
+
+  /// Detects a single experience entry whose date range was widened by
+  /// cross-document merging beyond what its contributing sides' bullets
+  /// actually cover — see [_contributingRangesOf]. Entries that never went
+  /// through a cross-document merge (fewer than 2 contributing ranges) are
+  /// skipped entirely — there's nothing for this failure mode to apply to.
+  /// General interval-merging: handles any number of contributing ranges,
+  /// not just two, so a 3+-way chained merge is covered the same way.
+  static List<TimelineCoverageGap> detectIntraEntryGaps(
+    List<dynamic> experienceEntries,
+  ) {
+    final gaps = <TimelineCoverageGap>[];
+
+    for (final raw in experienceEntries) {
+      final entry = raw as Map<String, dynamic>;
+      final ranges = entry['_contributingRanges'] as List<dynamic>?;
+      if (ranges == null || ranges.length < 2) continue;
+
+      final span = _entrySpan(entry);
+      if (span == null) continue;
+      final entryStart = span.start;
+      final entryEnd = span.end;
+      final entryId = entry['id'] as String? ?? '';
+
+      final covered = <({DateTime start, DateTime end})>[];
+      for (final r in ranges) {
+        final range = r as Map<String, dynamic>;
+        if (range['hasBullets'] != true) continue;
+        final start = parseApproxDate(coerceToString(range['start']));
+        if (start == null) continue;
+        final isCurrent = range['isCurrent'] as bool? ?? false;
+        final end = isCurrent
+            ? DateTime.now()
+            : (parseApproxDate(coerceToString(range['end'])) ?? start);
+        // Clip to the entry's own span — a contributing side's raw dates
+        // can't extend coverage beyond what the merged entry itself claims.
+        final clippedStart = start.isBefore(entryStart) ? entryStart : start;
+        final clippedEnd = end.isAfter(entryEnd) ? entryEnd : end;
+        if (clippedEnd.isAfter(clippedStart)) {
+          covered.add((start: clippedStart, end: clippedEnd));
+        }
+      }
+
+      // Merge overlapping/adjacent covered intervals, sorted ascending.
+      covered.sort((a, b) => a.start.compareTo(b.start));
+      final merged = <({DateTime start, DateTime end})>[];
+      for (final iv in covered) {
+        if (merged.isNotEmpty && !iv.start.isAfter(merged.last.end)) {
+          final last = merged.removeLast();
+          merged.add((
+            start: last.start,
+            end: iv.end.isAfter(last.end) ? iv.end : last.end,
+          ));
+        } else {
+          merged.add(iv);
+        }
+      }
+
+      // Walk the uncovered stretches: before the first covered interval,
+      // between consecutive covered intervals, and after the last one.
+      var cursor = entryStart;
+      for (final iv in merged) {
+        if (iv.start.difference(cursor).inDays >= minGapDays) {
+          gaps.add(TimelineCoverageGap(
+            id: 'gap_within_${entryId}_${cursor.toIso8601String()}',
+            startDate: cursor,
+            endDate: iv.start,
+            kind: TimelineGapKind.withinEntry,
+            adjacentEntryIds: [entryId],
+          ));
+        }
+        if (iv.end.isAfter(cursor)) cursor = iv.end;
+      }
+      if (entryEnd.difference(cursor).inDays >= minGapDays) {
+        gaps.add(TimelineCoverageGap(
+          id: 'gap_within_${entryId}_${cursor.toIso8601String()}',
+          startDate: cursor,
+          endDate: entryEnd,
+          kind: TimelineGapKind.withinEntry,
+          adjacentEntryIds: [entryId],
+        ));
+      }
+    }
+
+    return gaps;
+  }
+
   // ── Cross-section duplicate: same event as both a cert and a job ────────
   //
   // A single document (e.g. a multi-page transcript-style record) can
@@ -790,7 +1585,7 @@ class ResumeSanitizer {
           final c = raw as Map<String, dynamic>;
           return (
             name: normalizeTitle(c['name'] as String? ?? ''),
-            date: parseApproxDate(c['dateEarned'] as String?),
+            date: parseApproxDate(coerceToString(c['dateEarned'])),
           );
         })
         .where((c) => c.name.isNotEmpty)
@@ -800,9 +1595,9 @@ class ResumeSanitizer {
       final e = raw as Map<String, dynamic>;
       final title = normalizeTitle(e['title'] as String? ?? '');
       if (title.isEmpty) return true;
-      final start = parseApproxDate(e['startDate'] as String?);
+      final start = parseApproxDate(coerceToString(e['startDate']));
       final isCurrent = e['isCurrent'] as bool? ?? false;
-      final parsedEnd = parseApproxDate(e['endDate'] as String?);
+      final parsedEnd = parseApproxDate(coerceToString(e['endDate']));
       final bullets = e['bullets'] as List<dynamic>?;
 
       final isDuplicate = certSignatures.where((c) => c.name == title).any((c) {

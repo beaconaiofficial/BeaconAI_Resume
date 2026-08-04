@@ -25,6 +25,7 @@ import '../utils/app_logger.dart';
 import '../widgets/ai_consent_dialog.dart';
 import '../widgets/pending_decision_card.dart';
 import '../widgets/resume_template_renderer.dart';
+import '../widgets/wizard_widgets.dart';
 
 const _uuid = Uuid();
 
@@ -64,19 +65,28 @@ class _PageLimitException implements Exception {
 }
 
 // Per-file extraction result, accumulated during the sequential extraction loop.
-class _FileExtractionResult {
-  const _FileExtractionResult({
+class FileExtractionResult {
+  const FileExtractionResult({
     required this.fileName,
     required this.fileType,
     required this.rawText,
     required this.mappings,
     required this.pendingDecisions,
+    required this.unplacedFindings,
+    this.documentType,
   });
   final String fileName;
   final FileTypeEnum fileType;
   final String rawText;
   final List<Map<String, dynamic>> mappings;
   final List<PendingEntryDecision> pendingDecisions;
+  final List<UnplacedFinding> unplacedFindings;
+
+  /// The extraction model's self-reported document type for this file (see
+  /// ResumeSanitizer.SourceDocType) — null if extraction failed before this
+  /// could be read. Used to break cross-file field conflicts by source
+  /// authority (e.g. an STP's stated duty station outranks an NCOER's).
+  final String? documentType;
 }
 
 class DocumentUploadScreen extends ConsumerStatefulWidget {
@@ -90,6 +100,338 @@ class DocumentUploadScreen extends ConsumerStatefulWidget {
     if (tierLimit == -1) return 100;
     final remaining = tierLimit - uploadCount;
     return remaining < 0 ? 0 : remaining;
+  }
+
+  // ── Merge strategy ─────────────────────────────────────────────────────────
+  //
+  // Scalar fields (contact.*, summary):
+  //   - All files agree on value → one row, sourceFile annotated.
+  //   - Files disagree → show all distinct values with conflict: true so the
+  //     user can pick. Last accepted row in list wins when writing (= last
+  //     processed file is the tiebreaker, per spec).
+  //
+  // Skills:
+  //   - Union all entries, deduplicate by name (case-insensitive). Silent.
+  //
+  // Experience / Education / Certifications:
+  //   - Union all entries (show everything, let user remove duplicates).
+  //   - Flag hasPossibleDuplicates: true if a likely-duplicate pair is detected.
+  //   - Duplicate heuristics:
+  //       Experience    : same normalised company name
+  //       Education     : same normalised institution name
+  //       Certifications: same cert name (case-insensitive)
+  //
+  // Factored out as static (like remainingUploadSlots above) so the REAL
+  // merge path — including the Stage 1 document-type priority tiebreak via
+  // ResumeSanitizer.mergeCrossDocumentDuplicateRoles below — is directly
+  // testable with hand-built FileExtractionResult fixtures, without needing
+  // Hive/Riverpod/file-picker/network setup. Previously a private instance
+  // method (_mergeResults) only reachable by driving the actual upload flow
+  // end to end; it never touched instance state (widget/ref/setState), so
+  // this move is a pure visibility change, not a behavior change.
+  static List<Map<String, dynamic>> mergeResults(
+      List<FileExtractionResult> files) {
+    if (files.length == 1) {
+      return files.first.mappings
+          .map((m) => Map<String, dynamic>.from(m)
+            ..['sourceFile'] = files.first.fileName)
+          .toList();
+    }
+
+    // Collect scalar and list field candidates separately.
+    final scalarCandidates = <String, List<Map<String, dynamic>>>{};
+    final listCandidates = <String,
+        List<({
+          List<dynamic> entries,
+          String sourceFile,
+          double confidence,
+          String? documentType,
+        })>>{};
+
+    for (final file in files) {
+      for (final m in file.mappings) {
+        final field = m['field'] as String;
+        if (_isListField(field)) {
+          listCandidates.putIfAbsent(field, () => []).add((
+            entries: m['suggestedValue'] as List<dynamic>,
+            sourceFile: file.fileName,
+            confidence: m['confidence'] as double,
+            documentType: file.documentType,
+          ));
+        } else {
+          scalarCandidates
+              .putIfAbsent(field, () => [])
+              .add(Map<String, dynamic>.from(m)..['sourceFile'] = file.fileName);
+        }
+      }
+    }
+
+    final merged = <Map<String, dynamic>>[];
+
+    // ── Location conflict (contact.city + contact.state as one atomic pair) ──
+    //
+    // Two files can each report a COMPLETE, but genuinely different, address
+    // — a home-of-record mailing address vs. a current duty station. City
+    // and state must be resolved as ONE choice, not two independently
+    // toggleable fields: the existing conflictGroupId mechanism only
+    // enforces mutual exclusion WITHIN one field, so leaving them separate
+    // could let a user accept one file's city and a different file's state,
+    // silently assembling an address neither document actually contains.
+    // Only intervenes when 2+ files provide a complete pair; a file that
+    // reports just one of the two falls through to the ordinary per-field
+    // handling below, untouched.
+    final cityCandidates = scalarCandidates['contact.city'] ?? [];
+    final stateCandidates = scalarCandidates['contact.state'] ?? [];
+    final citiesByFile = {
+      for (final c in cityCandidates) c['sourceFile'] as String: c,
+    };
+    final statesByFile = {
+      for (final s in stateCandidates) s['sourceFile'] as String: s,
+    };
+    final filesWithBothFields =
+        citiesByFile.keys.toSet().intersection(statesByFile.keys.toSet());
+
+    final locationConflict = ResumeSanitizer.detectLocationConflict([
+      for (final file in filesWithBothFields)
+        {
+          'sourceFile': file,
+          'city': citiesByFile[file]!['suggestedValue'] as String,
+          'state': statesByFile[file]!['suggestedValue'] as String,
+          'documentType':
+              files.firstWhere((f) => f.fileName == file).documentType,
+        },
+    ]);
+
+    if (locationConflict != null) {
+      for (final candidate in locationConflict) {
+        final sourceFiles = candidate['sourceFiles'] as List<String>;
+        final representative = sourceFiles.first;
+        final cityRow = citiesByFile[representative]!;
+        final stateRow = statesByFile[representative]!;
+        merged.add({
+          'field': 'contact.location',
+          'suggestedValue': '${candidate['city']}, ${candidate['state']}',
+          'confidence': (cityRow['confidence'] as double) >=
+                  (stateRow['confidence'] as double)
+              ? cityRow['confidence']
+              : stateRow['confidence'],
+          // Stage 10: real testing showed neither extracted candidate is
+          // guaranteed correct for this field (a user's current address
+          // matched neither their home-of-record nor their duty-station
+          // city) — so unlike every other conflict group in this screen,
+          // contact.location never pre-selects an extracted candidate. The
+          // always-present manual-entry row below is the default instead.
+          'accepted': false,
+          'conflict': true,
+          'conflictGroupId': 'contact.location',
+          'locationConflict': true,
+          'sourceFile':
+              sourceFiles.length > 1 ? 'multiple files' : representative,
+          '_locationCity': candidate['city'],
+          '_locationState': candidate['state'],
+        });
+      }
+
+      // Stage 10: a third, always-present option alongside the extracted
+      // candidates above — neither candidate is guaranteed correct, so
+      // manual entry is never optional here, and (unlike the extracted
+      // candidates) it starts pre-selected by default. Same conflictGroupId
+      // as the candidates above, so selecting one deselects the others via
+      // the existing radio-group mechanism in onToggleMapping.
+      merged.add({
+        'field': 'contact.location',
+        'suggestedValue': '',
+        'confidence': 0.0,
+        'accepted': true,
+        'conflict': true,
+        'conflictGroupId': 'contact.location',
+        'locationConflict': true,
+        'manualEntry': true,
+        'sourceFile': null,
+        '_locationCity': '',
+        '_locationState': '',
+      });
+
+      // Files that participated are now represented by the combined row(s)
+      // above — leave any partial-info files' entries (city-only or
+      // state-only) in place for the ordinary per-field handling below.
+      final remainingCity = cityCandidates
+          .where((c) => !filesWithBothFields.contains(c['sourceFile']))
+          .toList();
+      final remainingState = stateCandidates
+          .where((s) => !filesWithBothFields.contains(s['sourceFile']))
+          .toList();
+      if (remainingCity.isEmpty) {
+        scalarCandidates.remove('contact.city');
+      } else {
+        scalarCandidates['contact.city'] = remainingCity;
+      }
+      if (remainingState.isEmpty) {
+        scalarCandidates.remove('contact.state');
+      } else {
+        scalarCandidates['contact.state'] = remainingState;
+      }
+    }
+
+    // Scalar fields
+    for (final field in scalarCandidates.keys) {
+      final candidates = scalarCandidates[field]!;
+      if (candidates.length == 1) {
+        merged.add(candidates.first);
+        continue;
+      }
+      // Check if all candidate values are equivalent.
+      final firstVal = _normalizeScalar(candidates.first['suggestedValue']);
+      final allSame = candidates
+          .every((c) => _normalizeScalar(c['suggestedValue']) == firstVal);
+      if (allSame) {
+        merged.add(Map<String, dynamic>.from(candidates.first)
+          ..['sourceFile'] = 'multiple files');
+      } else {
+        // Conflicting values: radio group — exactly one can be selected.
+        // Pre-select the first candidate (first processed file = tiebreaker).
+        // conflictGroupId is the field key; the state uses it to enforce
+        // mutual exclusion when the user taps a row.
+        for (int ci = 0; ci < candidates.length; ci++) {
+          merged.add(Map<String, dynamic>.from(candidates[ci])
+            ..['conflict'] = true
+            ..['conflictGroupId'] = field
+            ..['accepted'] = ci == 0);
+        }
+      }
+    }
+
+    // List fields
+    for (final field in listCandidates.keys) {
+      final sources = listCandidates[field]!;
+      final confidence =
+          sources.map((s) => s.confidence).reduce((a, b) => a > b ? a : b);
+      final sourceFile =
+          sources.length == 1 ? sources.first.sourceFile : 'multiple files';
+
+      List<dynamic> mergedList;
+      bool hasDuplicates;
+      bool hasEducationConflict = false;
+
+      if (field == 'skills') {
+        // Deduplicate by name (silent).
+        final seen = <String>{};
+        mergedList = [];
+        for (final src in sources) {
+          for (final entry in src.entries) {
+            final map = entry as Map<String, dynamic>;
+            final name = (map['name'] as String? ?? '').toLowerCase().trim();
+            if (seen.add(name) && name.isNotEmpty) {
+              mergedList.add(entry);
+            }
+          }
+        }
+        hasDuplicates = false;
+      } else {
+        // Stamp each entry with the document type its source file reported
+        // (see ResumeSanitizer.SourceDocType) before the merge/dedup
+        // functions below see it — this is how they know which side of a
+        // cross-file conflict to prefer (e.g. an STP's stated duty station
+        // over an NCOER's). A single-document upload, or a file whose
+        // extraction never reported a type, simply has this key absent —
+        // the merge functions fall back to their existing heuristics.
+        mergedList = sources
+            .expand((s) => s.entries.map((e) => <String, dynamic>{
+                  ...e as Map<String, dynamic>,
+                  if (s.documentType != null) '_sourceDocType': s.documentType,
+                }))
+            .toList();
+        if (field == 'experience') {
+          // Auto-merge substantive entries that confidently describe the
+          // same real-world role across documents/chunks (same fuzzy-
+          // matched company + title + a genuine date-range overlap) — see
+          // ResumeSanitizer.mergeCrossDocumentDuplicateRoles. A weaker
+          // signal (e.g. one side has only an incomplete date) is left
+          // alone and still flagged below for manual review, rather than
+          // risk silently merging two genuinely different assignments.
+          mergedList =
+              ResumeSanitizer.mergeCrossDocumentDuplicateRoles(mergedList);
+        } else if (field == 'education') {
+          // Same completion-aware consolidation already applied within a
+          // single file/PDF's chunk merge (see parseFieldMappings) — this
+          // was previously the one place education duplicates from SEPARATE
+          // uploaded files slipped through unconsolidated (union + flag
+          // only). A genuine disagreement between two completed records
+          // (e.g. conflicting GPA) is never silently resolved here —
+          // deduplicateEducation returns every entry in that conflict,
+          // each marked educationConflict: true, for the user to pick.
+          mergedList = ResumeSanitizer.deduplicateEducation(mergedList);
+          hasEducationConflict = mergedList.any((e) =>
+              (e as Map<String, dynamic>)['educationConflict'] == true);
+        }
+        hasDuplicates = _hasPossibleDuplicates(field, mergedList);
+      }
+
+      merged.add({
+        'field': field,
+        'suggestedValue': mergedList,
+        'confidence': confidence,
+        'accepted': true,
+        'sourceFile': sourceFile,
+        'hasPossibleDuplicates': hasDuplicates,
+        'hasEducationConflict': hasEducationConflict,
+      });
+    }
+
+    // Sort: scalars by confidence descending, list fields appended after.
+    final scalars =
+        merged.where((m) => !_isListField(m['field'] as String)).toList()
+          ..sort((a, b) => (b['confidence'] as double)
+              .compareTo(a['confidence'] as double));
+    final lists =
+        merged.where((m) => _isListField(m['field'] as String)).toList();
+
+    return [...scalars, ...lists];
+  }
+
+  // ── Field classification ───────────────────────────────────────────────────
+  // Moved alongside mergeResults above (same reason: pure functions with no
+  // instance-state dependency, now callable directly from tests).
+
+  static bool _isListField(String field) =>
+      field == 'experience' ||
+      field == 'education' ||
+      field == 'skills' ||
+      field == 'certifications';
+
+  static String _normalizeScalar(dynamic v) =>
+      (v?.toString() ?? '').toLowerCase().trim();
+
+  // Cross-document duplicate detection. A user uploading multiple source
+  // documents (a resume + a transcript, an old resume + a LinkedIn export,
+  // a JST + a Soldier Talent Profile) can end up with the same role or
+  // entry recorded twice with mismatched or incomplete dates — this applies
+  // to anyone with more than one source document, not any particular kind
+  // of document, so the check in ResumeSanitizer has no document-type gate.
+  static bool _hasPossibleDuplicates(String field, List<dynamic> entries) {
+    if (entries.length < 2) return false;
+    for (int i = 0; i < entries.length; i++) {
+      for (int j = i + 1; j < entries.length; j++) {
+        final a = entries[i] as Map<String, dynamic>;
+        final b = entries[j] as Map<String, dynamic>;
+        if (field == 'experience') {
+          if (ResumeSanitizer.isLikelyCrossDocumentDuplicateRole(a, b)) {
+            return true;
+          }
+        } else if (field == 'education') {
+          final an = ResumeSanitizer.normalizeInstitution(
+              a['institution'] as String? ?? '');
+          final bn = ResumeSanitizer.normalizeInstitution(
+              b['institution'] as String? ?? '');
+          if (an.isNotEmpty && an == bn) return true;
+        } else if (field == 'certifications') {
+          final an = (a['name'] as String? ?? '').toLowerCase().trim();
+          final bn = (b['name'] as String? ?? '').toLowerCase().trim();
+          if (an.isNotEmpty && an == bn) return true;
+        }
+      }
+    }
+    return false;
   }
 
   @override
@@ -109,7 +451,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
   String? _errorMessage;
 
   // Multi-file extraction tracking
-  List<_FileExtractionResult> _processedFiles = [];
+  List<FileExtractionResult> _processedFiles = [];
   List<String> _failedFiles = [];
   int _extractingIndex = 0; // 1-based for display
   int _totalFiles = 0;
@@ -128,6 +470,21 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
   // vs. training, or real credential vs. compliance clutter). Ephemeral —
   // never persisted. Apply All is blocked until every card is resolved.
   List<PendingEntryDecision> _pendingDecisions = [];
+
+  // Numbers/claims the extraction model found but couldn't confidently map
+  // to a structured field (e.g. a GPA figure not tied to a specific
+  // education entry). Ephemeral — never persisted. Unlike pending
+  // decisions, these don't block Apply All — discarding one silently is a
+  // valid resolution (the finding just never becomes part of the resume).
+  List<UnplacedFinding> _unplacedFindings = [];
+
+  // Stretches of time with no narrative support found across the merged
+  // experience/education/certification entries (see
+  // ResumeSanitizer.detectInterEntryGaps / detectIntraEntryGaps). Ephemeral
+  // — resolved (dismissed or confirmed) only for this session, the same as
+  // _pendingDecisions/_unplacedFindings; there is no persisted "don't ask
+  // again" memory. Doesn't block Apply All.
+  List<TimelineCoverageGap> _timelineGaps = [];
 
   @override
   void didChangeDependencies() {
@@ -209,6 +566,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
     _failedFiles = [];
     _mappings = [];
     _pendingDecisions = [];
+    _unplacedFindings = [];
 
     setState(() {
       _totalFiles = validFiles.length;
@@ -344,10 +702,14 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
     }
 
     // Merge results from all successfully processed files.
-    _mappings = _mergeResults(_processedFiles);
+    _mappings = DocumentUploadScreen.mergeResults(_processedFiles);
     _pendingDecisions = [
       for (final f in _processedFiles) ...f.pendingDecisions,
     ];
+    _unplacedFindings = [
+      for (final f in _processedFiles) ...f.unplacedFindings,
+    ];
+    _timelineGaps = _detectTimelineGaps(_mappings);
 
     // When uploading into an existing resume (not first-time setup), apply
     // pre-check strategy: auto-accept empty fields, conditionally accept
@@ -363,7 +725,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
 
   // ── Single-file extraction ─────────────────────────────────────────────────
 
-  Future<_FileExtractionResult?> _extractOneFile(
+  Future<FileExtractionResult?> _extractOneFile(
       List<int> bytes, FileTypeEnum fileType, String fileName) async {
     try {
       // PDF takes a two-stage pipeline: Option 1 (layout text) with
@@ -371,12 +733,14 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
       if (fileType == FileTypeEnum.pdf) {
         final (rawText, json) = await _extractPdfFields(bytes, fileName);
         final parsed = CloudflareWorkerService.parseFieldMappings(json);
-        return _FileExtractionResult(
+        return FileExtractionResult(
           fileName: fileName,
           fileType: fileType,
           rawText: rawText,
           mappings: parsed.mappings,
           pendingDecisions: parsed.pendingDecisions,
+          unplacedFindings: parsed.unplacedFindings,
+          documentType: parsed.documentType,
         );
       }
 
@@ -414,12 +778,14 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
       }
 
       final parsed = CloudflareWorkerService.parseFieldMappings(json);
-      return _FileExtractionResult(
+      return FileExtractionResult(
         fileName: fileName,
         fileType: fileType,
         rawText: rawText,
         mappings: parsed.mappings,
         pendingDecisions: parsed.pendingDecisions,
+        unplacedFindings: parsed.unplacedFindings,
+        documentType: parsed.documentType,
       );
     } on _PageLimitException {
       rethrow;
@@ -667,11 +1033,30 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
         });
       }
 
-      var chunkText = extractor.extractText(
-        startPageIndex: startPage,
-        endPageIndex: endPage,
-        layoutText: true,
-      );
+      String chunkText;
+      try {
+        chunkText = extractor.extractText(
+          startPageIndex: startPage,
+          endPageIndex: endPage,
+          layoutText: true,
+        );
+      } catch (e) {
+        // Some PDFs extract fine one page at a time (the quality-check pass
+        // above already succeeded) but throw on a MULTI-page range read —
+        // observed on a real digitally-signed/protected transcript as a
+        // library-internal null-check failure, not the message-matchable
+        // "permission/security/encrypt" shape _extractRawPdfText's per-page
+        // loop already knows to catch. Whatever the cause, every remaining
+        // chunk shares the same extractor/page-collection state and would
+        // fail the same way, so there's nothing safe to skip-and-continue
+        // here — abandon the whole chunked-text attempt and let the caller's
+        // existing FormatException handler fall back to the multimodal PDF
+        // path instead of losing this file's content entirely.
+        devLog('[PDF] pages ${startPage + 1}–${endPage + 1}: range extraction '
+            'threw ($e) → falling back to multimodal PDF path');
+        throw FormatException(
+            'Range text extraction failed on pages ${startPage + 1}–${endPage + 1}: $e');
+      }
       // Watermark removal runs before the char cap so noise doesn't eat budget.
       var cleaned = _removeWatermarkNoise(_normalizeWhitespace(chunkText));
       // Hard cap per chunk — prevents enormous ACE table pages from
@@ -734,7 +1119,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
 
   /// Merges JSON strings returned by individual chunk calls.
   /// Scalars: first non-empty value across chunks wins.
-  /// Lists: union of all entries (deduplication is done by _mergeResults later).
+  /// Lists: union of all entries (deduplication is done by mergeResults later).
   String _mergeChunkJsons(List<String> jsonStrings) {
     final chunks = <Map<String, dynamic>>[];
     for (final s in jsonStrings) {
@@ -763,6 +1148,16 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
     final merged = <String, dynamic>{
       if (mergedContact.isNotEmpty) 'contact': mergedContact,
     };
+
+    // documentType is a per-document property — every chunk of one file
+    // should report the same value, so the first non-empty one wins.
+    for (final chunk in chunks) {
+      final v = chunk['documentType'] as String?;
+      if (v != null && v.isNotEmpty) {
+        merged['documentType'] = v;
+        break;
+      }
+    }
 
     for (final chunk in chunks) {
       if (!merged.containsKey('summary')) {
@@ -807,8 +1202,8 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
     // duplicate as both startDate and endDate.
     final normalizedExperience = allExperience.map((e) {
       final map = Map<String, dynamic>.from(e as Map<String, dynamic>);
-      final start = map['startDate'] as String? ?? '';
-      final end = map['endDate'] as String? ?? '';
+      final start = ResumeSanitizer.coerceToString(map['startDate']) ?? '';
+      final end = ResumeSanitizer.coerceToString(map['endDate']) ?? '';
       if (end.isNotEmpty && end == start) {
         map['endDate'] = '';
       } else if (start.isEmpty && end.isNotEmpty) {
@@ -826,146 +1221,44 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
     return jsonEncode(merged);
   }
 
-  // ── Merge strategy ─────────────────────────────────────────────────────────
-  //
-  // Scalar fields (contact.*, summary):
-  //   - All files agree on value → one row, sourceFile annotated.
-  //   - Files disagree → show all distinct values with conflict: true so the
-  //     user can pick. Last accepted row in list wins when writing (= last
-  //     processed file is the tiebreaker, per spec).
-  //
-  // Skills:
-  //   - Union all entries, deduplicate by name (case-insensitive). Silent.
-  //
-  // Experience / Education / Certifications:
-  //   - Union all entries (show everything, let user remove duplicates).
-  //   - Flag hasPossibleDuplicates: true if a likely-duplicate pair is detected.
-  //   - Duplicate heuristics:
-  //       Experience    : same normalised company name
-  //       Education     : same normalised institution name
-  //       Certifications: same cert name (case-insensitive)
+  // ── Timeline coverage gap detection (Stage 3) ─────────────────────────────
 
-  List<Map<String, dynamic>> _mergeResults(
-      List<_FileExtractionResult> files) {
-    if (files.length == 1) {
-      return files.first.mappings
-          .map((m) => Map<String, dynamic>.from(m)
-            ..['sourceFile'] = files.first.fileName)
-          .toList();
+  /// Pulls the final merged experience/education/certification lists out of
+  /// [mappings] and runs both gap detectors against them. Safe against any
+  /// of the three fields being absent (no candidates for that field at all,
+  /// or every candidate rejected as a scalar-style conflict — list fields
+  /// never take that path, but the fallback keeps this defensive) or not a
+  /// List for any reason — falls back to an empty list rather than crash.
+  static List<TimelineCoverageGap> _detectTimelineGaps(
+      List<Map<String, dynamic>> mappings) {
+    List<dynamic> listFor(String field) {
+      final row = mappings.firstWhere((m) => m['field'] == field,
+          orElse: () => const {'suggestedValue': <dynamic>[]});
+      return (row['suggestedValue'] as List<dynamic>?) ?? const [];
     }
 
-    // Collect scalar and list field candidates separately.
-    final scalarCandidates = <String, List<Map<String, dynamic>>>{};
-    final listCandidates = <String,
-        List<({List<dynamic> entries, String sourceFile, double confidence})>>{};
+    final experience = listFor('experience');
+    final education = listFor('education');
+    final certifications = listFor('certifications');
 
-    for (final file in files) {
-      for (final m in file.mappings) {
-        final field = m['field'] as String;
-        if (_isListField(field)) {
-          listCandidates.putIfAbsent(field, () => []).add((
-            entries: m['suggestedValue'] as List<dynamic>,
-            sourceFile: file.fileName,
-            confidence: m['confidence'] as double,
-          ));
-        } else {
-          scalarCandidates
-              .putIfAbsent(field, () => [])
-              .add(Map<String, dynamic>.from(m)..['sourceFile'] = file.fileName);
-        }
-      }
-    }
+    return [
+      ...ResumeSanitizer.detectInterEntryGaps(
+          experience, education, certifications),
+      ...ResumeSanitizer.detectIntraEntryGaps(experience),
+    ];
+  }
 
-    final merged = <Map<String, dynamic>>[];
-
-    // Scalar fields
-    for (final field in scalarCandidates.keys) {
-      final candidates = scalarCandidates[field]!;
-      if (candidates.length == 1) {
-        merged.add(candidates.first);
-        continue;
-      }
-      // Check if all candidate values are equivalent.
-      final firstVal = _normalizeScalar(candidates.first['suggestedValue']);
-      final allSame = candidates
-          .every((c) => _normalizeScalar(c['suggestedValue']) == firstVal);
-      if (allSame) {
-        merged.add(Map<String, dynamic>.from(candidates.first)
-          ..['sourceFile'] = 'multiple files');
-      } else {
-        // Conflicting values: radio group — exactly one can be selected.
-        // Pre-select the first candidate (first processed file = tiebreaker).
-        // conflictGroupId is the field key; the state uses it to enforce
-        // mutual exclusion when the user taps a row.
-        for (int ci = 0; ci < candidates.length; ci++) {
-          merged.add(Map<String, dynamic>.from(candidates[ci])
-            ..['conflict'] = true
-            ..['conflictGroupId'] = field
-            ..['accepted'] = ci == 0);
-        }
-      }
-    }
-
-    // List fields
-    for (final field in listCandidates.keys) {
-      final sources = listCandidates[field]!;
-      final confidence =
-          sources.map((s) => s.confidence).reduce((a, b) => a > b ? a : b);
-      final sourceFile =
-          sources.length == 1 ? sources.first.sourceFile : 'multiple files';
-
-      List<dynamic> mergedList;
-      bool hasDuplicates;
-
-      if (field == 'skills') {
-        // Deduplicate by name (silent).
-        final seen = <String>{};
-        mergedList = [];
-        for (final src in sources) {
-          for (final entry in src.entries) {
-            final map = entry as Map<String, dynamic>;
-            final name = (map['name'] as String? ?? '').toLowerCase().trim();
-            if (seen.add(name) && name.isNotEmpty) {
-              mergedList.add(entry);
-            }
-          }
-        }
-        hasDuplicates = false;
-      } else {
-        mergedList = sources.expand((s) => s.entries).toList();
-        if (field == 'experience') {
-          // Auto-merge substantive entries that confidently describe the
-          // same real-world role across documents/chunks (same fuzzy-
-          // matched company + title + a genuine date-range overlap) — see
-          // ResumeSanitizer.mergeCrossDocumentDuplicateRoles. A weaker
-          // signal (e.g. one side has only an incomplete date) is left
-          // alone and still flagged below for manual review, rather than
-          // risk silently merging two genuinely different assignments.
-          mergedList =
-              ResumeSanitizer.mergeCrossDocumentDuplicateRoles(mergedList);
-        }
-        hasDuplicates = _hasPossibleDuplicates(field, mergedList);
-      }
-
-      merged.add({
-        'field': field,
-        'suggestedValue': mergedList,
-        'confidence': confidence,
-        'accepted': true,
-        'sourceFile': sourceFile,
-        'hasPossibleDuplicates': hasDuplicates,
-      });
-    }
-
-    // Sort: scalars by confidence descending, list fields appended after.
-    final scalars =
-        merged.where((m) => !_isListField(m['field'] as String)).toList()
-          ..sort((a, b) => (b['confidence'] as double)
-              .compareTo(a['confidence'] as double));
-    final lists =
-        merged.where((m) => _isListField(m['field'] as String)).toList();
-
-    return [...scalars, ...lists];
+  /// Resolves a timeline gap card — removes it from the list either way.
+  /// Dismissing or confirming "no gap" are both valid, non-blocking
+  /// resolutions (same convention as [UnplacedFinding]): the user
+  /// acknowledging there's nothing more to add is not a failure state.
+  void _resolveTimelineGap(String id, TimelineGapStatus status) {
+    setState(() {
+      final index = _timelineGaps.indexWhere((g) => g.id == id);
+      if (index == -1) return;
+      devLog('[TIMELINE GAP] $id resolved as ${status.name}');
+      _timelineGaps.removeAt(index);
+    });
   }
 
   // ── Pre-check against existing resume data ────────────────────────────────
@@ -982,7 +1275,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
       final field = m['field'] as String;
       final suggested = m['suggestedValue'];
 
-      if (_isListField(field)) {
+      if (DocumentUploadScreen._isListField(field)) {
         // Combine existing + suggested entries and check for duplicates.
         final existingEntries = <dynamic>[];
         switch (field) {
@@ -998,7 +1291,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
         }
         if (existingEntries.isEmpty) continue;
         final combined = [...existingEntries, ...(suggested as List)];
-        if (_hasPossibleDuplicates(field, combined)) {
+        if (DocumentUploadScreen._hasPossibleDuplicates(field, combined)) {
           _mappings[i] = Map<String, dynamic>.from(m)
             ..['hasPossibleDuplicates'] = true;
         }
@@ -1033,6 +1326,10 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
       'contact.professionalTitle' => data.contact.professionalTitle,
       'contact.city' => data.contact.city,
       'contact.state' => data.contact.state,
+      'contact.location' => data.contact.city.isNotEmpty &&
+              data.contact.state.isNotEmpty
+          ? '${data.contact.city}, ${data.contact.state}'
+          : '',
       'contact.phone' => data.contact.phone,
       'contact.email' => data.contact.email,
       'contact.linkedInUrl' => data.contact.linkedInUrl ?? '',
@@ -1041,49 +1338,6 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
       'summary' => data.summary,
       _ => '',
     };
-  }
-
-  // ── Field classification ───────────────────────────────────────────────────
-
-  static bool _isListField(String field) =>
-      field == 'experience' ||
-      field == 'education' ||
-      field == 'skills' ||
-      field == 'certifications';
-
-  static String _normalizeScalar(dynamic v) =>
-      (v?.toString() ?? '').toLowerCase().trim();
-
-  // Cross-document duplicate detection. A user uploading multiple source
-  // documents (a resume + a transcript, an old resume + a LinkedIn export,
-  // a JST + a Soldier Talent Profile) can end up with the same role or
-  // entry recorded twice with mismatched or incomplete dates — this applies
-  // to anyone with more than one source document, not any particular kind
-  // of document, so the check in ResumeSanitizer has no document-type gate.
-  static bool _hasPossibleDuplicates(String field, List<dynamic> entries) {
-    if (entries.length < 2) return false;
-    for (int i = 0; i < entries.length; i++) {
-      for (int j = i + 1; j < entries.length; j++) {
-        final a = entries[i] as Map<String, dynamic>;
-        final b = entries[j] as Map<String, dynamic>;
-        if (field == 'experience') {
-          if (ResumeSanitizer.isLikelyCrossDocumentDuplicateRole(a, b)) {
-            return true;
-          }
-        } else if (field == 'education') {
-          final an = ResumeSanitizer.normalizeInstitution(
-              a['institution'] as String? ?? '');
-          final bn = ResumeSanitizer.normalizeInstitution(
-              b['institution'] as String? ?? '');
-          if (an.isNotEmpty && an == bn) return true;
-        } else if (field == 'certifications') {
-          final an = (a['name'] as String? ?? '').toLowerCase().trim();
-          final bn = (b['name'] as String? ?? '').toLowerCase().trim();
-          if (an.isNotEmpty && an == bn) return true;
-        }
-      }
-    }
-    return false;
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
@@ -1156,11 +1410,17 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
 
   /// Routes a resolved pending-entry decision into the right mapping row,
   /// running it through the same sanitizer path any other extracted entry
-  /// takes (bullet cap when routed to experience). Removes the card once
-  /// resolved. A skipped/dismissed card must resolve to
-  /// [EntryDecision.exclude] — never a silent default to inclusion, since
-  /// silently including or dropping an entry nobody looked at is the exact
-  /// failure mode this card exists to prevent.
+  /// takes. Removes the card once resolved. A skipped/dismissed card must
+  /// resolve to [EntryDecision.exclude] — never a silent default to
+  /// inclusion, since silently including or dropping an entry nobody
+  /// looked at is the exact failure mode this card exists to prevent.
+  ///
+  /// No bullet cap here: this screen (document upload / Wizard Path A) only
+  /// ever builds or updates the Master Resume — there is no route or mode
+  /// that reaches it for Tailored Resume generation — so per Stage 9,
+  /// every bullet the model kept survives. See ResumeSanitizer.capBullets's
+  /// doc comment for where capping legitimately still belongs (Tailored
+  /// Resume paths only).
   void _resolvePendingDecision(String id, EntryDecision decision) {
     final index = _pendingDecisions.indexWhere((d) => d.id == id);
     if (index == -1) return;
@@ -1175,12 +1435,8 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
         final entry = Map<String, dynamic>.from(pending.rawEntry)
           ..remove('entryType')
           ..remove('uncertaintyReason');
-        entry['bullets'] = ResumeSanitizer.capBullets(
-          (entry['bullets'] as List<dynamic>?)
-                  ?.map((b) => b.toString())
-                  .toList() ??
-              [],
-        );
+        entry['bullets'] =
+            ResumeSanitizer.normalizeBulletList(entry['bullets']);
         _appendToListMapping('experience', entry);
       } else if (decision == EntryDecision.education) {
         final entry = Map<String, dynamic>.from(pending.rawEntry)
@@ -1196,7 +1452,9 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
               'id': 'uuid-placeholder',
               'name': pending.rawTitle,
               'issuer': pending.rawCompany,
-              'dateEarned': pending.rawEntry['startDate'] as String? ?? '',
+              'dateEarned':
+                  ResumeSanitizer.coerceToString(pending.rawEntry['startDate']) ??
+                      '',
               'expiresDate': null,
               'credentialId': null,
               'isAIPrefilled': true,
@@ -1212,7 +1470,9 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
               'name': degree.isNotEmpty ? degree : pending.rawCompany,
               'issuer': pending.rawCompany,
               'dateEarned':
-                  pending.rawEntry['graduationYear'] as String? ?? '',
+                  ResumeSanitizer.coerceToString(
+                          pending.rawEntry['graduationYear']) ??
+                      '',
               'expiresDate': null,
               'credentialId': null,
               'isAIPrefilled': true,
@@ -1224,6 +1484,99 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
         }
         _appendToListMapping('certifications', cert);
       }
+    });
+  }
+
+  // ── Unplaced finding resolution ─────────────────────────────────────────
+
+  /// Places or discards an unplaced finding (a number/claim Claude found but
+  /// couldn't confidently map to a structured field — see
+  /// CloudflareWorkerService's Unplaced Findings rule). Unlike a pending
+  /// decision, discarding one is a fully valid resolution on its own —
+  /// Apply All never blocks on these, since the whole point is that the
+  /// figure might not belong anywhere on the resume at all.
+  void _resolveUnplacedFinding(
+    String id, {
+    int? attachToEducationIndex,
+    int? appendToExperienceIndex,
+  }) {
+    final index = _unplacedFindings.indexWhere((f) => f.id == id);
+    if (index == -1) return;
+    final finding = _unplacedFindings[index];
+
+    setState(() {
+      _unplacedFindings.removeAt(index);
+
+      if (attachToEducationIndex != null) {
+        final eduRow = _mappings.indexWhere((m) => m['field'] == 'education');
+        if (eduRow == -1) return;
+        final list =
+            List<dynamic>.from(_mappings[eduRow]['suggestedValue'] as List);
+        if (attachToEducationIndex >= list.length) return;
+        final entry =
+            Map<String, dynamic>.from(list[attachToEducationIndex] as Map);
+        // Prefer just the numeric figure over the raw finding text (e.g.
+        // "3.94" out of "3.94 GPA in Information Technology") — a gpa field
+        // should hold a bare number, not the surrounding claim.
+        final numberMatch = RegExp(r'\d+\.?\d*').firstMatch(finding.value);
+        entry['gpa'] = numberMatch?.group(0) ?? finding.value;
+        list[attachToEducationIndex] = entry;
+        _mappings[eduRow] = Map<String, dynamic>.from(_mappings[eduRow])
+          ..['suggestedValue'] = list;
+      } else if (appendToExperienceIndex != null) {
+        final expRow = _mappings.indexWhere((m) => m['field'] == 'experience');
+        if (expRow == -1) return;
+        final list =
+            List<dynamic>.from(_mappings[expRow]['suggestedValue'] as List);
+        if (appendToExperienceIndex >= list.length) return;
+        final entry =
+            Map<String, dynamic>.from(list[appendToExperienceIndex] as Map);
+        final bullets = ResumeSanitizer.normalizeBulletList(entry['bullets']);
+        bullets.add({'text': finding.value, 'hasQuantifiableData': true});
+        entry['bullets'] = bullets;
+        list[appendToExperienceIndex] = entry;
+        _mappings[expRow] = Map<String, dynamic>.from(_mappings[expRow])
+          ..['suggestedValue'] = list;
+      }
+      // Neither index set → discard. Already removed above.
+    });
+  }
+
+  // ── Bullet metric-request resolution ────────────────────────────────────
+
+  /// Resolves a bullet flagged with no quantifiable data (see the extraction
+  /// prompt's bullet quality rule). Supplying [metricText] rewrites the
+  /// bullet and marks it as now carrying quantifiable data; leaving it null
+  /// dismisses the prompt without changing the text — either way,
+  /// metricRequested is set so this bullet never re-prompts on a later
+  /// visit to this same in-progress confirmation screen.
+  void _resolveBulletMetric(
+    int experienceIndex,
+    int bulletIndex,
+    String? metricText,
+  ) {
+    setState(() {
+      final expRow = _mappings.indexWhere((m) => m['field'] == 'experience');
+      if (expRow == -1) return;
+      final list =
+          List<dynamic>.from(_mappings[expRow]['suggestedValue'] as List);
+      if (experienceIndex >= list.length) return;
+      final entry = Map<String, dynamic>.from(list[experienceIndex] as Map);
+      final bullets = ResumeSanitizer.normalizeBulletList(entry['bullets']);
+      if (bulletIndex >= bullets.length) return;
+      bullets[bulletIndex] = {
+        'text': (metricText != null && metricText.trim().isNotEmpty)
+            ? metricText.trim()
+            : bullets[bulletIndex]['text'],
+        'hasQuantifiableData': metricText != null && metricText.trim().isNotEmpty
+            ? true
+            : bullets[bulletIndex]['hasQuantifiableData'],
+        'metricRequested': true,
+      };
+      entry['bullets'] = bullets;
+      list[experienceIndex] = entry;
+      _mappings[expRow] = Map<String, dynamic>.from(_mappings[expRow])
+        ..['suggestedValue'] = list;
     });
   }
 
@@ -1299,6 +1652,11 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
       final resume = HiveService.resumeBox.get(_resumeId);
       if (resume != null) {
         resume.uploadCount += _processedFiles.length;
+        // Timeline-gap detection (see _detectTimelineGaps) already ran
+        // against this session's full merged document set — record the
+        // uploadCount it reflects so a future non-upload surface can tell
+        // source documents haven't changed since, without recomputing.
+        resume.timelineGapsCheckedAtUploadCount = resume.uploadCount;
         await resume.save();
         final check = HiveService.resumeBox.get(_resumeId);
         devLog('[UPLOAD COUNT] Hive value: ${check?.uploadCount}');
@@ -1349,13 +1707,10 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
         .toList();
 
     // Contact: assemble sub-field map; for conflicts, last-accepted wins.
-    final contactMap = <String, dynamic>{};
-    for (final m in accepted) {
-      final field = m['field'] as String;
-      if (field.startsWith('contact.')) {
-        contactMap[field.substring('contact.'.length)] = m['suggestedValue'];
-      }
-    }
+    // Shared with _writeMappingsToSections below — see
+    // ResumeSanitizer.contactMapFromAcceptedMappings's doc comment for why
+    // this must be one implementation, not two.
+    final contactMap = ResumeSanitizer.contactMapFromAcceptedMappings(accepted);
     if (contactMap.isNotEmpty) prefill['contact'] = contactMap;
 
     // Summary: last-accepted value wins for conflicts.
@@ -1409,13 +1764,10 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
 
     try {
       // Contact: assemble sub-field map; for conflicts, last-accepted wins.
-      final contactMap = <String, dynamic>{};
-      for (final m in accepted) {
-        final field = m['field'] as String;
-        if (field.startsWith('contact.')) {
-          contactMap[field.substring('contact.'.length)] = m['suggestedValue'];
-        }
-      }
+      // Shared with _buildPrefillFromMappings above — see
+      // ResumeSanitizer.contactMapFromAcceptedMappings's doc comment for
+      // why this must be one implementation, not two.
+      final contactMap = ResumeSanitizer.contactMapFromAcceptedMappings(accepted);
       if (contactMap.isNotEmpty) {
         await putSection(SectionTypeEnum.contact, jsonEncode(contactMap));
       }
@@ -1546,6 +1898,8 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
             failedFileNames: _failedFiles,
             mappings: _mappings,
             pendingDecisions: _pendingDecisions,
+            unplacedFindings: _unplacedFindings,
+            timelineGaps: _timelineGaps,
             isDark: isDark,
             showSourceFile: multiFile,
             skippedPagesNote: _skippedPagesNote,
@@ -1564,12 +1918,39 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
                 _mappings[i]['accepted'] = accepted;
               });
             },
+            // Stage 10: typing into the manual-entry row's text field both
+            // supplies its value AND selects it within the conflict's radio
+            // group (reusing the same mutual-exclusion logic as
+            // onToggleMapping above) — the user shouldn't have to tap the
+            // radio separately before typing.
+            onManualLocationChanged: (i, city, state) {
+              setState(() {
+                final groupId = _mappings[i]['conflictGroupId'] as String?;
+                if (groupId != null) {
+                  for (final m in _mappings) {
+                    if (m['conflictGroupId'] == groupId) {
+                      m['accepted'] = false;
+                    }
+                  }
+                }
+                _mappings[i]['accepted'] = true;
+                _mappings[i]['_locationCity'] = city;
+                _mappings[i]['_locationState'] = state;
+                _mappings[i]['suggestedValue'] =
+                    [city, state].where((s) => s.isNotEmpty).join(', ');
+              });
+            },
             onResolveDecision: _resolvePendingDecision,
+            onResolveUnplacedFinding: _resolveUnplacedFinding,
+            onResolveBulletMetric: _resolveBulletMetric,
+            onResolveTimelineGap: _resolveTimelineGap,
             onApplyAll: _applyAll,
             onCancel: () => setState(() {
               _state = _UploadState.picking;
               _mappings = [];
               _pendingDecisions = [];
+              _unplacedFindings = [];
+              _timelineGaps = [];
               _processedFiles = [];
               _failedFiles = [];
               _errorMessage = null;
@@ -1680,7 +2061,17 @@ class _PickerView extends StatelessWidget {
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 4),
+
+          const SectionTipCard(
+            tip: 'Not sure what to upload? Start with anything that '
+                'already describes your work history: an old resume, '
+                'transcripts, performance reviews, or certifications. '
+                'Veterans: your DD-214, JST, Soldier Talent Profile, or an '
+                'NCOER/EPR/FITREP/OER works great — we\'ll translate '
+                'military terms into civilian resume language automatically.',
+            icon: Icons.description_outlined,
+          ),
 
           // Capacity card
           Container(
@@ -1899,10 +2290,16 @@ class ConfirmationView extends StatelessWidget {
     required this.failedFileNames,
     required this.mappings,
     required this.pendingDecisions,
+    required this.unplacedFindings,
+    required this.timelineGaps,
     required this.isDark,
     required this.showSourceFile,
     required this.onToggleMapping,
+    required this.onManualLocationChanged,
     required this.onResolveDecision,
+    required this.onResolveUnplacedFinding,
+    required this.onResolveBulletMetric,
+    required this.onResolveTimelineGap,
     required this.onApplyAll,
     required this.onCancel,
     this.skippedPagesNote,
@@ -1912,13 +2309,85 @@ class ConfirmationView extends StatelessWidget {
   final List<String> failedFileNames;
   final List<Map<String, dynamic>> mappings;
   final List<PendingEntryDecision> pendingDecisions;
+  final List<UnplacedFinding> unplacedFindings;
+  final List<TimelineCoverageGap> timelineGaps;
   final bool isDark;
   final bool showSourceFile;
   final void Function(int index, bool accepted) onToggleMapping;
+  /// Stage 10: manual text entry for the contact.location conflict row —
+  /// supplies [index]'s city/state directly (never a re-parse of a
+  /// "City, State" display string elsewhere) and selects that row within
+  /// its conflict group.
+  final void Function(int index, String city, String state)
+      onManualLocationChanged;
   final void Function(String id, EntryDecision decision) onResolveDecision;
+  final void Function(
+    String id, {
+    int? attachToEducationIndex,
+    int? appendToExperienceIndex,
+  }) onResolveUnplacedFinding;
+  final void Function(int experienceIndex, int bulletIndex, String? metricText)
+      onResolveBulletMetric;
+  final void Function(String id, TimelineGapStatus status)
+      onResolveTimelineGap;
   final VoidCallback onApplyAll;
   final VoidCallback onCancel;
   final String? skippedPagesNote;
+
+  /// Current education entries (from the 'education' mapping row, if any) —
+  /// used as the "attach to..." options on an unplaced-finding card.
+  List<Map<String, dynamic>> get _educationEntries {
+    final row = mappings.where((m) => m['field'] == 'education').firstOrNull;
+    if (row == null) return const [];
+    return (row['suggestedValue'] as List)
+        .cast<Map<String, dynamic>>()
+        .toList();
+  }
+
+  /// Current experience entries (from the 'experience' mapping row, if
+  /// any) — used both for the unplaced-finding "add as a bullet to..."
+  /// options and to enumerate bullets still needing a metric.
+  List<Map<String, dynamic>> get _experienceEntries {
+    final row = mappings.where((m) => m['field'] == 'experience').firstOrNull;
+    if (row == null) return const [];
+    return (row['suggestedValue'] as List)
+        .cast<Map<String, dynamic>>()
+        .toList();
+  }
+
+  /// Every bullet across all experience entries that Claude flagged with no
+  /// quantifiable data and that hasn't already been asked about (or has,
+  /// but the user hasn't resolved it yet — metricRequested stays false
+  /// until [onResolveBulletMetric] runs). One card per bullet, not per
+  /// entry, so a resume with several under-quantified bullets across
+  /// different roles surfaces all of them, not just one per job.
+  List<({int experienceIndex, int bulletIndex, String text, String title, String company})>
+      get _bulletsNeedingMetric {
+    final result = <({
+      int experienceIndex,
+      int bulletIndex,
+      String text,
+      String title,
+      String company
+    })>[];
+    final entries = _experienceEntries;
+    for (int i = 0; i < entries.length; i++) {
+      final bullets = ResumeSanitizer.normalizeBulletList(entries[i]['bullets']);
+      for (int j = 0; j < bullets.length; j++) {
+        final b = bullets[j];
+        if (b['hasQuantifiableData'] == false && b['metricRequested'] != true) {
+          result.add((
+            experienceIndex: i,
+            bulletIndex: j,
+            text: b['text'] as String? ?? '',
+            title: entries[i]['title'] as String? ?? '',
+            company: entries[i]['company'] as String? ?? '',
+          ));
+        }
+      }
+    }
+    return result;
+  }
 
   String _fieldLabel(String field) {
     return switch (field) {
@@ -1927,6 +2396,7 @@ class ConfirmationView extends StatelessWidget {
       'contact.professionalTitle' => 'Professional Title',
       'contact.city' => 'City',
       'contact.state' => 'State',
+      'contact.location' => 'Location',
       'contact.phone' => 'Phone',
       'contact.email' => 'Email',
       'contact.linkedInUrl' => 'LinkedIn URL',
@@ -2044,7 +2514,10 @@ class ConfirmationView extends StatelessWidget {
 
         // Field mapping list
         Expanded(
-          child: mappings.isEmpty && pendingDecisions.isEmpty
+          child: mappings.isEmpty &&
+                  pendingDecisions.isEmpty &&
+                  unplacedFindings.isEmpty &&
+                  timelineGaps.isEmpty
               ? Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -2074,21 +2547,76 @@ class ConfirmationView extends StatelessWidget {
                     ],
                   ),
                 )
-              : ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-                  itemCount: pendingDecisions.length + mappings.length,
-                  itemBuilder: (ctx, i) {
-                    if (i < pendingDecisions.length) {
-                      final decision = pendingDecisions[i];
-                      return PendingDecisionCard(
-                        decision: decision,
-                        isDark: isDark,
-                        onResolve: (choice) =>
-                            onResolveDecision(decision.id, choice),
-                      );
-                    }
+              : Builder(builder: (ctx) {
+                  final bulletFindings = _bulletsNeedingMetric;
+                  final pendingCount = pendingDecisions.length;
+                  final unplacedCount = unplacedFindings.length;
+                  final bulletCount = bulletFindings.length;
+                  final gapCount = timelineGaps.length;
+                  final cardsCount =
+                      pendingCount + unplacedCount + bulletCount + gapCount;
 
-                    final m = mappings[i - pendingDecisions.length];
+                  return ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                    itemCount: cardsCount + mappings.length,
+                    itemBuilder: (ctx, i) {
+                      if (i < pendingCount) {
+                        final decision = pendingDecisions[i];
+                        return PendingDecisionCard(
+                          decision: decision,
+                          isDark: isDark,
+                          onResolve: (choice) =>
+                              onResolveDecision(decision.id, choice),
+                        );
+                      }
+
+                      if (i < pendingCount + unplacedCount) {
+                        final finding = unplacedFindings[i - pendingCount];
+                        return _UnplacedFindingCard(
+                          finding: finding,
+                          isDark: isDark,
+                          educationEntries: _educationEntries,
+                          experienceEntries: _experienceEntries,
+                          onDiscard: () =>
+                              onResolveUnplacedFinding(finding.id),
+                          onAttachToEducation: (idx) => onResolveUnplacedFinding(
+                              finding.id,
+                              attachToEducationIndex: idx),
+                          onAppendToExperience: (idx) => onResolveUnplacedFinding(
+                              finding.id,
+                              appendToExperienceIndex: idx),
+                        );
+                      }
+
+                      if (i < pendingCount + unplacedCount + bulletCount) {
+                        final bf =
+                            bulletFindings[i - pendingCount - unplacedCount];
+                        return _BulletMetricCard(
+                          isDark: isDark,
+                          bulletText: bf.text,
+                          title: bf.title,
+                          company: bf.company,
+                          onSupply: (metricText) => onResolveBulletMetric(
+                              bf.experienceIndex, bf.bulletIndex, metricText),
+                          onDismiss: () => onResolveBulletMetric(
+                              bf.experienceIndex, bf.bulletIndex, null),
+                        );
+                      }
+
+                      if (i < cardsCount) {
+                        final gap = timelineGaps[
+                            i - pendingCount - unplacedCount - bulletCount];
+                        return _TimelineGapCard(
+                          gap: gap,
+                          isDark: isDark,
+                          onConfirmNoGap: () => onResolveTimelineGap(
+                              gap.id, TimelineGapStatus.userConfirmedNoGap),
+                          onDismiss: () => onResolveTimelineGap(
+                              gap.id, TimelineGapStatus.dismissed),
+                        );
+                      }
+
+                      final m = mappings[i - cardsCount];
                     final accepted = m['accepted'] as bool;
                     final field = m['field'] as String;
                     final value = m['suggestedValue'];
@@ -2098,6 +2626,11 @@ class ConfirmationView extends StatelessWidget {
                         showSourceFile ? m['sourceFile'] as String? : null;
                     final isConflict = m['conflict'] == true;
                     final hasDuplicates = m['hasPossibleDuplicates'] == true;
+                    final hasEducationConflict =
+                        m['hasEducationConflict'] == true;
+                    final hasLocationConflict = m['locationConflict'] == true;
+                    final manualEntry = m['manualEntry'] == true;
+                    final milEmailWarning = m['milEmailWarning'] == true;
                     final existingNote = m['existingNote'] as String?;
                     // Soft count guidance: the app targets a focused 8-12
                     // skill list — flag (never silently truncate) when the
@@ -2122,13 +2655,23 @@ class ConfirmationView extends StatelessWidget {
                       sourceFile: sourceFile,
                       isConflict: isConflict,
                       hasPossibleDuplicates: hasDuplicates,
+                      hasEducationConflict: hasEducationConflict,
+                      hasLocationConflict: hasLocationConflict,
+                      manualEntry: manualEntry,
+                      manualCity: m['_locationCity'] as String? ?? '',
+                      manualState: m['_locationState'] as String? ?? '',
+                      milEmailWarning: milEmailWarning,
                       existingNote: existingNote,
                       countNote: countNote,
-                      onToggle: (v) => onToggleMapping(
-                          i - pendingDecisions.length, v),
+                      onToggle: (v) => onToggleMapping(i - cardsCount, v),
+                      onManualEntryChanged: manualEntry
+                          ? (city, state) => onManualLocationChanged(
+                              i - cardsCount, city, state)
+                          : null,
                     );
-                  },
-                ),
+                    },
+                  );
+                }),
         ),
 
         // Bottom actions
@@ -2190,6 +2733,381 @@ class ConfirmationView extends StatelessWidget {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// _UnplacedFindingCard
+//
+// A number/claim Claude found in the source material but couldn't
+// confidently map to a structured field (see CloudflareWorkerService's
+// Unplaced Findings rule) — e.g. a GPA figure that doesn't match any
+// education entry. Shown with its source context so the user can judge
+// where it belongs; "Discard" is a fully valid resolution, not a fallback.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _UnplacedFindingCard extends StatelessWidget {
+  const _UnplacedFindingCard({
+    required this.finding,
+    required this.isDark,
+    required this.educationEntries,
+    required this.experienceEntries,
+    required this.onDiscard,
+    required this.onAttachToEducation,
+    required this.onAppendToExperience,
+  });
+
+  final UnplacedFinding finding;
+  final bool isDark;
+  final List<Map<String, dynamic>> educationEntries;
+  final List<Map<String, dynamic>> experienceEntries;
+  final VoidCallback onDiscard;
+  final ValueChanged<int> onAttachToEducation;
+  final ValueChanged<int> onAppendToExperience;
+
+  @override
+  Widget build(BuildContext context) {
+    final warningColor =
+        isDark ? AppColors.warningDark : AppColors.warningLight;
+    final textTheme = Theme.of(context).textTheme;
+    final onSurfaceVariant = Theme.of(context).colorScheme.onSurfaceVariant;
+
+    return Semantics(
+      container: true,
+      label: 'Unplaced finding: ${finding.value}. Choose where it belongs, '
+          'or discard it.',
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: BoxDecoration(
+          color: warningColor.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: warningColor.withValues(alpha: 0.5)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.help_outline, size: 18, color: warningColor),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Found: ${finding.value}',
+                        style: textTheme.titleMedium?.copyWith(
+                          fontSize: 13,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
+                      ),
+                      if (finding.context.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          '"${finding.context}"',
+                          style: textTheme.bodyMedium?.copyWith(
+                            fontSize: 12,
+                            fontStyle: FontStyle.italic,
+                            color: onSurfaceVariant,
+                          ),
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      const SizedBox(height: 4),
+                      Text(
+                        'Not sure which entry this belongs to — choose one, '
+                        'or discard it.',
+                        style: textTheme.bodyMedium?.copyWith(
+                          fontSize: 11,
+                          color: warningColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (int i = 0; i < educationEntries.length; i++)
+                  OutlinedButton(
+                    onPressed: () => onAttachToEducation(i),
+                    child: Text(
+                      'Attach to '
+                      '${(educationEntries[i]['institution'] as String?)?.isNotEmpty == true ? educationEntries[i]['institution'] : 'this education entry'}',
+                      style: textTheme.labelLarge,
+                    ),
+                  ),
+                for (int i = 0; i < experienceEntries.length; i++)
+                  OutlinedButton(
+                    onPressed: () => onAppendToExperience(i),
+                    child: Text(
+                      'Add as a bullet to '
+                      '${(experienceEntries[i]['title'] as String?)?.isNotEmpty == true ? experienceEntries[i]['title'] : 'this role'}',
+                      style: textTheme.labelLarge,
+                    ),
+                  ),
+                TextButton(
+                  onPressed: onDiscard,
+                  child: Text('Discard', style: textTheme.labelLarge),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _TimelineGapCard
+//
+// A stretch of time with no narrative support found across the merged
+// experience/education/certification entries (see
+// ResumeSanitizer.detectInterEntryGaps / detectIntraEntryGaps) — either
+// dead time between two separate jobs, or a single entry whose date range
+// was widened by cross-document merging beyond what its bullets actually
+// cover. Confirming "nothing missing" or dismissing are both valid,
+// non-blocking resolutions — this never blocks Apply All.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const List<String> _gapMonthNames = [
+  '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+String _formatGapDate(DateTime d) => '${_gapMonthNames[d.month]} ${d.year}';
+
+class _TimelineGapCard extends StatelessWidget {
+  const _TimelineGapCard({
+    required this.gap,
+    required this.isDark,
+    required this.onConfirmNoGap,
+    required this.onDismiss,
+  });
+
+  final TimelineCoverageGap gap;
+  final bool isDark;
+  final VoidCallback onConfirmNoGap;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final warningColor =
+        isDark ? AppColors.warningDark : AppColors.warningLight;
+    final textTheme = Theme.of(context).textTheme;
+    final onSurfaceVariant = Theme.of(context).colorScheme.onSurfaceVariant;
+
+    final rangeText =
+        '${_formatGapDate(gap.startDate)} – ${_formatGapDate(gap.endDate)}';
+    final prompt = gap.kind == TimelineGapKind.betweenEntries
+        ? 'We don\'t see role details for $rangeText — what were you doing '
+            'during this time?'
+        : 'This role\'s dates span $rangeText, but we don\'t see details '
+            'covering all of it — did your duties change over this period?';
+
+    return Semantics(
+      container: true,
+      label: 'Timeline gap: $rangeText. Confirm there\'s nothing missing, '
+          'or dismiss.',
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: BoxDecoration(
+          color: warningColor.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: warningColor.withValues(alpha: 0.5)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.event_busy, size: 18, color: warningColor),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Possible gap: $rangeText',
+                        style: textTheme.titleMedium?.copyWith(
+                          fontSize: 13,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        prompt,
+                        style: textTheme.bodyMedium?.copyWith(
+                          fontSize: 11,
+                          color: onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton(
+                  onPressed: onConfirmNoGap,
+                  child: Text('Nothing missing', style: textTheme.labelLarge),
+                ),
+                TextButton(
+                  onPressed: onDismiss,
+                  child: Text('Dismiss', style: textTheme.labelLarge),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _BulletMetricCard
+//
+// A bullet Claude kept for its independent skill/scope value despite
+// finding no quantifiable result for it anywhere in the source material
+// (hasQuantifiableData: false — see the extraction prompt's bullet quality
+// rule). Invites the user to add a number directly; dismissing is a valid
+// resolution that marks metricRequested so this bullet doesn't re-prompt.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _BulletMetricCard extends StatefulWidget {
+  const _BulletMetricCard({
+    required this.isDark,
+    required this.bulletText,
+    required this.title,
+    required this.company,
+    required this.onSupply,
+    required this.onDismiss,
+  });
+
+  final bool isDark;
+  final String bulletText;
+  final String title;
+  final String company;
+  final ValueChanged<String> onSupply;
+  final VoidCallback onDismiss;
+
+  @override
+  State<_BulletMetricCard> createState() => _BulletMetricCardState();
+}
+
+class _BulletMetricCardState extends State<_BulletMetricCard> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.bulletText);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final warningColor =
+        widget.isDark ? AppColors.warningDark : AppColors.warningLight;
+    final textTheme = Theme.of(context).textTheme;
+    final onSurfaceVariant = Theme.of(context).colorScheme.onSurfaceVariant;
+    final subtitle = widget.company.isNotEmpty
+        ? '${widget.title} · ${widget.company}'
+        : widget.title;
+
+    return Semantics(
+      container: true,
+      label: 'Bullet could be stronger with a number: ${widget.bulletText}',
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: BoxDecoration(
+          color: warningColor.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: warningColor.withValues(alpha: 0.5)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.bar_chart, size: 18, color: warningColor),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (subtitle.isNotEmpty)
+                        Text(
+                          subtitle,
+                          style: textTheme.bodyMedium?.copyWith(
+                            fontSize: 11,
+                            color: onSurfaceVariant,
+                          ),
+                        ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'This bullet could be stronger with a number — how '
+                        'many people, what percentage, how much time or '
+                        'money did this affect? (e.g. "...for a team of 12" '
+                        'or "...reducing processing time by 30%")',
+                        style: textTheme.bodyMedium?.copyWith(
+                          fontSize: 12,
+                          color: warningColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _controller,
+              maxLines: 3,
+              minLines: 1,
+              style: textTheme.bodyMedium?.copyWith(fontSize: 13),
+              decoration: const InputDecoration(
+                isDense: true,
+                border: OutlineInputBorder(),
+                contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton(
+                  onPressed: () => widget.onSupply(_controller.text),
+                  child: Text('Save', style: textTheme.labelLarge),
+                ),
+                TextButton(
+                  onPressed: widget.onDismiss,
+                  child: Text('Skip', style: textTheme.labelLarge),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _MappingRow extends StatelessWidget {
   const _MappingRow({
     required this.fieldLabel,
@@ -2202,6 +3120,13 @@ class _MappingRow extends StatelessWidget {
     this.sourceFile,
     this.isConflict = false,
     this.hasPossibleDuplicates = false,
+    this.hasEducationConflict = false,
+    this.hasLocationConflict = false,
+    this.manualEntry = false,
+    this.manualCity = '',
+    this.manualState = '',
+    this.onManualEntryChanged,
+    this.milEmailWarning = false,
     this.existingNote,
     this.countNote,
   });
@@ -2216,6 +3141,18 @@ class _MappingRow extends StatelessWidget {
   final String? sourceFile;
   final bool isConflict;
   final bool hasPossibleDuplicates;
+  final bool hasEducationConflict;
+  final bool hasLocationConflict;
+  /// Stage 10: this row is the always-present manual-entry option in the
+  /// contact.location conflict group — renders a text field instead of a
+  /// static value preview, equally prominent alongside the extracted
+  /// candidates (same row styling, same radio group), not a fallback
+  /// hidden behind an extra tap.
+  final bool manualEntry;
+  final String manualCity;
+  final String manualState;
+  final void Function(String city, String state)? onManualEntryChanged;
+  final bool milEmailWarning;
   final String? existingNote;
   final String? countNote;
 
@@ -2312,25 +3249,45 @@ class _MappingRow extends StatelessWidget {
                           ),
                         ),
                         const SizedBox(width: 8),
-                        // Confidence badge
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 5, vertical: 1),
-                          decoration: BoxDecoration(
-                            color: _confidenceColor(confidence, isDark)
-                                .withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Text(
-                            '$confidence%',
-                            style: GoogleFonts.jetBrainsMono(
-                              fontSize: 9,
-                              fontWeight: FontWeight.w600,
-                              color: _confidenceColor(confidence, isDark),
+                        // Manual-entry rows have no extraction confidence or
+                        // source file to show — a "Manual" badge in their
+                        // place instead of a meaningless "0%".
+                        if (manualEntry)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 5, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: accent.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              'MANUAL',
+                              style: GoogleFonts.jetBrainsMono(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w600,
+                                color: accent,
+                              ),
+                            ),
+                          )
+                        else
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 5, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: _confidenceColor(confidence, isDark)
+                                  .withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              '$confidence%',
+                              style: GoogleFonts.jetBrainsMono(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w600,
+                                color: _confidenceColor(confidence, isDark),
+                              ),
                             ),
                           ),
-                        ),
-                        if (sourceFile != null) ...[
+                        if (!manualEntry && sourceFile != null) ...[
                           const SizedBox(width: 6),
                           Flexible(
                             child: Container(
@@ -2359,17 +3316,27 @@ class _MappingRow extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 3),
-                    Text(
-                      valuePreview,
-                      style: GoogleFonts.inter(
-                        fontSize: 12,
-                        height: 1.4,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    if (manualEntry)
+                      _ManualLocationEntry(
+                        initialCity: manualCity,
+                        initialState: manualState,
+                        isDark: isDark,
+                        accent: accent,
+                        onChanged: onManualEntryChanged ?? (_, __) {},
+                      )
+                    else
+                      Text(
+                        valuePreview,
+                        style: GoogleFonts.inter(
+                          fontSize: 12,
+                          height: 1.4,
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (isConflict) ...[
+                    if (isConflict && !manualEntry) ...[
                       const SizedBox(height: 4),
                       Text(
                         'Conflict with another file — choose one',
@@ -2380,13 +3347,103 @@ class _MappingRow extends StatelessWidget {
                         ),
                       ),
                     ],
-                    if (hasPossibleDuplicates) ...[
+                    if (hasEducationConflict) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: warningColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(Icons.warning_amber_rounded,
+                                size: 14, color: warningColor),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                'These entries disagree (e.g. different GPA) '
+                                'for what looks like the same degree — '
+                                'review below and remove the incorrect one.',
+                                style: GoogleFonts.inter(
+                                  fontSize: 11,
+                                  color: warningColor,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ] else if (hasLocationConflict) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: warningColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(Icons.warning_amber_rounded,
+                                size: 14, color: warningColor),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                'Your files report different addresses — this '
+                                'looks like a home address vs. duty station '
+                                'difference. Pick the one to use below.',
+                                style: GoogleFonts.inter(
+                                  fontSize: 11,
+                                  color: warningColor,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ] else if (hasPossibleDuplicates) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: warningColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(Icons.warning_amber_rounded,
+                                size: 14, color: warningColor),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                'May contain duplicates from multiple files — review before applying',
+                                style: GoogleFonts.inter(
+                                  fontSize: 11,
+                                  color: warningColor,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                    if (milEmailWarning) ...[
                       const SizedBox(height: 4),
                       Text(
-                        'May contain duplicates from multiple files — review before applying',
+                        'This is a military (.mil) email — it stops working '
+                        'after separation. Consider adding a personal email.',
                         style: GoogleFonts.inter(
                           fontSize: 10,
-                          color: warningColor,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
@@ -2455,6 +3512,94 @@ class _MappingRow extends StatelessWidget {
       return isDark ? AppColors.warningDark : AppColors.warningLight;
     }
     return isDark ? AppColors.errorDark : AppColors.errorLight;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Manual location entry (Stage 10)
+//
+// The always-present third option in the contact.location conflict group —
+// real testing showed neither extracted candidate (home-of-record vs.
+// duty-station) is guaranteed to be the user's actual current address, so
+// unlike every other conflict in this screen, manual entry here isn't a
+// fallback hidden behind extra taps; it's an equally prominent option that
+// starts pre-selected. Owns its own TextEditingController (seeded once in
+// initState, not rebuilt from the parent's data on every keystroke-driven
+// setState) so typing doesn't lose cursor position/focus the way rebuilding
+// a controller from _MappingRow's own (Stateless) fields on every parent
+// rebuild would.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ManualLocationEntry extends StatefulWidget {
+  const _ManualLocationEntry({
+    required this.initialCity,
+    required this.initialState,
+    required this.isDark,
+    required this.accent,
+    required this.onChanged,
+  });
+
+  final String initialCity;
+  final String initialState;
+  final bool isDark;
+  final Color accent;
+  final void Function(String city, String state) onChanged;
+
+  @override
+  State<_ManualLocationEntry> createState() => _ManualLocationEntryState();
+}
+
+class _ManualLocationEntryState extends State<_ManualLocationEntry> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    final initial = [widget.initialCity, widget.initialState]
+        .where((s) => s.isNotEmpty)
+        .join(', ');
+    _controller = TextEditingController(text: initial);
+    _controller.addListener(_notify);
+  }
+
+  // Splits "City, State" the same way preview_edit_screen.dart's
+  // _applyContactEdit splits its cityState field — on the first ", " —
+  // so this manual entry and every other city/state input in the app
+  // agree on the same format.
+  void _notify() {
+    final parts = _controller.text.split(',');
+    final city = parts.isNotEmpty ? parts[0].trim() : '';
+    final state = parts.length > 1 ? parts.sublist(1).join(',').trim() : '';
+    widget.onChanged(city, state);
+  }
+
+  @override
+  void dispose() {
+    _controller.removeListener(_notify);
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: _controller,
+      style: GoogleFonts.inter(fontSize: 12),
+      decoration: InputDecoration(
+        isDense: true,
+        hintText: 'City, State',
+        hintStyle: GoogleFonts.inter(
+          fontSize: 12,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+        border: const OutlineInputBorder(),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        focusedBorder: OutlineInputBorder(
+          borderSide: BorderSide(color: widget.accent, width: 1.5),
+        ),
+      ),
+    );
   }
 }
 

@@ -28,12 +28,22 @@ class DocxExportService {
     required ResumeRenderData data,
   }) async {
     final documentXml = _buildDocumentXml(data);
+    final headerXml = _buildHeaderXml(data);
 
     final archive = Archive();
 
     archive.addFile(_textFile('[Content_Types].xml', _contentTypesXml));
     archive.addFile(_textFile('_rels/.rels', _rootRelsXml));
     archive.addFile(_textFile('word/document.xml', documentXml));
+    // A real Word repeating header — see word/_rels/document.xml.rels'
+    // rId2 and document.xml's <w:headerReference>. Without this part (and
+    // its wiring), the contact block would just be regular body paragraphs
+    // that only ever appear once, wherever they land in the content flow —
+    // the exact single-page-only bug this fixes, same root cause as the
+    // PDF export's header before its own fix, but DOCX has no equivalent
+    // to MultiPage's header: callback; a real header PART is the only way
+    // Word repeats content per page.
+    archive.addFile(_textFile('word/header1.xml', headerXml));
     archive
         .addFile(_textFile('word/_rels/document.xml.rels', _documentRelsXml));
     archive.addFile(_textFile('word/styles.xml', _stylesXml));
@@ -67,28 +77,13 @@ class DocxExportService {
 
     buffer.writeln('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
     buffer.writeln(
-        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">');
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">');
     buffer.writeln('<w:body>');
 
-    // ── Contact header ─────────────────────────────────────────────────────
-    if (data.contact.fullName.isNotEmpty) {
-      buffer.writeln(_heading(data.contact.fullName, level: 1, size: 32));
-    }
-    if (data.contact.professionalTitle.isNotEmpty) {
-      buffer.writeln(_paragraph(data.contact.professionalTitle,
-          size: 22, color: '2C4A7C'));
-    }
-    final contactLine = [
-      data.contact.cityState,
-      data.contact.phone,
-      data.contact.email,
-      data.contact.linkedInUrl,
-    ].where((s) => s != null && s.isNotEmpty).join('   |   ');
-    if (contactLine.isNotEmpty) {
-      buffer.writeln(_paragraph(contactLine, size: 18, color: '6B7280'));
-    }
-
-    buffer.writeln(_horizontalRule());
+    // Contact header lives in word/header1.xml now (see _buildHeaderXml) so
+    // it repeats on every page via <w:headerReference> below, instead of
+    // being body content that only ever renders once.
 
     // ── Summary ───────────────────────────────────────────────────────────
     if (data.summary.isNotEmpty) {
@@ -111,7 +106,7 @@ class DocxExportService {
           tabRight: true,
         ));
         for (final b in e.bullets.where((b) => b.isNotEmpty)) {
-          buffer.writeln(_bulletParagraph(b, size: 20));
+          buffer.writeln(_bulletParagraph(b.text, size: 20));
         }
         buffer.writeln(_spacerParagraph());
       }
@@ -162,16 +157,59 @@ class DocxExportService {
       }
     }
 
-    // Section properties — US Letter, 1 inch margins
+    // Section properties — US Letter, 1 inch margins.
+    // headerReference wires in word/header1.xml (rId2) as the repeating
+    // header for every page in this section, including the first — no
+    // <w:titlePg/> here, so there's no separate "first page" header to
+    // define; "default" applies uniformly.
     buffer.writeln('<w:sectPr>');
+    buffer.writeln('<w:headerReference w:type="default" r:id="rId2"/>');
     buffer.writeln('<w:pgSz w:w="12240" w:h="15840"/>');
     buffer.writeln(
-        '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>');
+        '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" '
+        'w:header="720" w:footer="720"/>');
     buffer.writeln('</w:sectPr>');
 
     buffer.writeln('</w:body>');
     buffer.writeln('</w:document>');
 
+    return buffer.toString();
+  }
+
+  // ── Header part builder ─────────────────────────────────────────────────────
+
+  /// Builds word/header1.xml — the actual repeating header content (name,
+  /// title, contact line, divider). Same fields and styling
+  /// _buildDocumentXml used to inline at the top of the body before this
+  /// fix; moved here so Word repeats it on every page via the
+  /// <w:headerReference> in document.xml's sectPr, rather than it only
+  /// ever appearing once wherever it happened to land in the body flow.
+  static String _buildHeaderXml(ResumeRenderData data) {
+    final buffer = StringBuffer();
+
+    buffer.writeln('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
+    buffer.writeln(
+        '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">');
+
+    if (data.contact.fullName.isNotEmpty) {
+      buffer.writeln(_heading(data.contact.fullName, level: 1, size: 32));
+    }
+    if (data.contact.professionalTitle.isNotEmpty) {
+      buffer.writeln(_paragraph(data.contact.professionalTitle,
+          size: 22, color: '2C4A7C'));
+    }
+    final contactLine = [
+      data.contact.cityState,
+      data.contact.phone,
+      data.contact.email,
+      data.contact.linkedInUrl,
+    ].where((s) => s != null && s.isNotEmpty).join('   |   ');
+    if (contactLine.isNotEmpty) {
+      buffer.writeln(_paragraph(contactLine, size: 18, color: '6B7280'));
+    }
+    buffer.writeln(_horizontalRule());
+
+    buffer.writeln('</w:hdr>');
     return buffer.toString();
   }
 
@@ -289,6 +327,7 @@ class DocxExportService {
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
 <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
 <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
 <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
 <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
@@ -306,6 +345,7 @@ class DocxExportService {
       '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
 </Relationships>''';
 
   static const String _stylesXml =

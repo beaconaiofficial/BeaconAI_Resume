@@ -38,7 +38,7 @@ class SampleResumeData {
           r'Managed $1.2M annual paid media budget across Google Ads, LinkedIn, '
               'and programmatic channels',
           'Built and scaled marketing team from 2 to 8 contributors',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
       ExperienceEntry(
         id: 'jc_e2',
@@ -53,7 +53,7 @@ class SampleResumeData {
               'improving open rates from 18% to 31%',
           'Reduced customer acquisition cost by 30% through landing page '
               'testing and audience refinement',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
     ],
     education: [
@@ -147,7 +147,7 @@ class SampleResumeData {
               'monitoring systems',
           'Led team of 6 engineers across network operations and cybersecurity '
               'functions',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
       ExperienceEntry(
         id: 'jr_e2',
@@ -161,7 +161,7 @@ class SampleResumeData {
           'Administered Cisco enterprise network across 12 locations serving '
               '2,000+ users',
           'Implemented COMSEC protocols reducing security incidents by 60%',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
     ],
     education: [
@@ -256,7 +256,7 @@ class SampleResumeData {
           'Led migration of a monolithic billing system to AWS, cutting '
               r'infrastructure costs by $180K annually',
           'Mentored 3 junior engineers and led weekly code review sessions',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
       ExperienceEntry(
         id: 'mc_e2',
@@ -271,7 +271,7 @@ class SampleResumeData {
               'improving cross-team release velocity by 20%',
           'Optimized PostgreSQL queries reducing average page load time '
               'from 2.1s to 400ms',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
     ],
     education: [
@@ -335,7 +335,7 @@ class SampleResumeData {
           'Led due diligence on 6 acquisition targets, identifying '
               r'$2.3M in projected synergies',
           'Presented quarterly forecasts directly to the CFO and executive team',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
       ExperienceEntry(
         id: 'ev_e2',
@@ -350,7 +350,7 @@ class SampleResumeData {
               'identifying cost-saving opportunities averaging 8% per account',
           'Automated a manual reporting process, reducing close time from 5 '
               'days to 2',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
     ],
     education: [
@@ -414,7 +414,7 @@ class SampleResumeData {
               'campaigns for a \$12M product line',
           'Grew Instagram engagement rate from 1.8% to 4.6% through a '
               'refreshed content and visual strategy',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
       ExperienceEntry(
         id: 'pn_e2',
@@ -429,7 +429,7 @@ class SampleResumeData {
               'hospitality, and consumer goods',
           'Built a reusable brand template system adopted studio-wide, '
               'cutting turnaround time by 30%',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
     ],
     education: [
@@ -491,7 +491,7 @@ class SampleResumeData {
               'points for the CEO and board',
           'Managed crisis communications during a public policy dispute, '
               'preserving key media relationships',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
       ExperienceEntry(
         id: 'ob_e2',
@@ -506,7 +506,7 @@ class SampleResumeData {
               'press contact list of 300+ journalists',
           'Drafted newsletters and social content that grew subscriber base '
               'by 40%',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
     ],
     education: [
@@ -559,7 +559,7 @@ class SampleResumeData {
               'product line, presenting findings to the regional director',
           'Built a dashboard in Excel that automated a weekly reporting process, '
               'saving the team an estimated 3 hours per week',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
       ExperienceEntry(
         id: 'mt_e2',
@@ -574,7 +574,7 @@ class SampleResumeData {
               'scheduling and daily sales targets',
           'Recognized as Employee of the Quarter for consistently exceeding '
               'customer satisfaction benchmarks',
-        ],
+        ].map((s) => BulletEntry(text: s)).toList(),
       ),
     ],
     education: [

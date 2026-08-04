@@ -182,8 +182,10 @@ void main() {
     expect(HiveService.settings.experienceSanitizedVersion,
         ResumeSanitizer.currentSanitizationVersion);
 
-    // Experience: bare stub discarded, training entry moved out, real job's
-    // bullets capped at 6.
+    // Experience: bare stub discarded, training entry moved out. Bullets
+    // are NOT capped — this resume is isMaster: true, and Stage 9 made
+    // Master Resumes exhaustive with no page limit, so even a 9-bullet
+    // entry (well over the old cap of 6) must survive migration intact.
     final expAfter = jsonDecode(
         HiveService.resumeSectionBox
             .get('${resumeId}_${SectionTypeEnum.experience.name}')!
@@ -194,8 +196,10 @@ void main() {
     final realJob = expAfter.first as Map<String, dynamic>;
     expect(realJob['title'], 'Operations Manager');
     expect(realJob['company'], 'Northgate Retail Co.');
-    expect((realJob['bullets'] as List).length, 6,
-        reason: 'bullets over the cap must be trimmed to 6');
+    expect((realJob['bullets'] as List).length, overCapBullets.length,
+        reason: 'Stage 9 — Master Resumes are exhaustive with no page '
+            'limit; the bullet cap must never apply to a Master Resume, '
+            'regardless of how many bullets one entry has');
 
     // Certifications: PMP untouched, training entry promoted in, compliance
     // entry FLAGGED (not deleted).
@@ -254,5 +258,106 @@ void main() {
         reason: 'second run must be a no-op — the tampered bare stub added '
             'after the version flag was set must survive untouched, proving '
             'the migration did not re-scan');
+  });
+
+  // ── Stage 9 extension — bullet cap gated on Resume.isMaster ────────────
+  //
+  // ResumeSanitizer.capBullets used to run unconditionally in
+  // ResumeMigrationService (as well as CloudflareWorkerService and
+  // DocumentUploadScreen, both of which are unambiguously Master-Resume-
+  // only and no longer call it at all). This service is the one call site
+  // that genuinely needs gating: runIfNeeded iterates every stored resume
+  // regardless of type, so it's the only place a Tailored Resume's bullets
+  // and a Master Resume's bullets ever go through the same code path.
+
+  List<String> fifteenBullets() => [
+        for (int i = 1; i <= 15; i++)
+          'Distinct generated achievement bullet number $i with its own detail',
+      ];
+
+  Future<void> seedResume({
+    required String resumeId,
+    required bool isMaster,
+    required List<String> bullets,
+  }) async {
+    await HiveService.resumeBox.put(
+      resumeId,
+      Resume(
+        id: resumeId,
+        title: isMaster ? 'Master Resume' : 'Tailored Resume',
+        createdAt: DateTime(2024, 1, 1),
+        updatedAt: DateTime(2024, 1, 1),
+        isMaster: isMaster,
+      ),
+    );
+    final experienceJson = jsonEncode([
+      {
+        'id': 'e1',
+        'title': 'Logistics Supervisor',
+        'company': 'Meridian Distribution',
+        'location': 'Denver, CO',
+        'startDate': '2019',
+        'endDate': '2023',
+        'isCurrent': false,
+        'bullets': bullets,
+        'isAIPrefilled': true,
+      },
+    ]);
+    await HiveService.resumeSectionBox.put(
+      '${resumeId}_${SectionTypeEnum.experience.name}',
+      ResumeSection(
+        id: 'sec_exp_$resumeId',
+        resumeId: resumeId,
+        type: SectionTypeEnum.experience,
+        data: experienceJson,
+      ),
+    );
+  }
+
+  test(
+      'Stage 9 — a Master Resume with 15+ generated bullets for one role '
+      'keeps every one of them after migration', () async {
+    await HiveService.userSettingsBox
+        .put(AppConstants.userSettingsKey, UserSettings.defaults());
+
+    const resumeId = 'master1';
+    final bullets = fifteenBullets();
+    await seedResume(resumeId: resumeId, isMaster: true, bullets: bullets);
+
+    await ResumeMigrationService.runIfNeeded();
+
+    final expAfter = jsonDecode(HiveService.resumeSectionBox
+        .get('${resumeId}_${SectionTypeEnum.experience.name}')!
+        .data) as List<dynamic>;
+    final entry = expAfter.first as Map<String, dynamic>;
+    expect((entry['bullets'] as List).length, bullets.length,
+        reason: 'Master Resumes are exhaustive with no page limit — all '
+            '${bullets.length} bullets must survive migration, not just '
+            'the old 6-bullet cap');
+  });
+
+  test(
+      'Stage 9 — a Tailored Resume with the same 15+ bullets is still '
+      'capped appropriately', () async {
+    await HiveService.userSettingsBox
+        .put(AppConstants.userSettingsKey, UserSettings.defaults());
+
+    const resumeId = 'tailored1';
+    final bullets = fifteenBullets();
+    await seedResume(resumeId: resumeId, isMaster: false, bullets: bullets);
+
+    await ResumeMigrationService.runIfNeeded();
+
+    final expAfter = jsonDecode(HiveService.resumeSectionBox
+        .get('${resumeId}_${SectionTypeEnum.experience.name}')!
+        .data) as List<dynamic>;
+    final entry = expAfter.first as Map<String, dynamic>;
+    expect((entry['bullets'] as List).length, lessThan(bullets.length),
+        reason: 'a Tailored Resume legitimately targets a short bullet '
+            'list (one page, two-page max) — unlike a Master Resume, its '
+            'bullets must still be capped');
+    expect((entry['bullets'] as List).length, 6,
+        reason: 'the existing ResumeSanitizer.capBullets default (6) still '
+            'applies to Tailored Resumes — only Master Resumes are exempt');
   });
 }

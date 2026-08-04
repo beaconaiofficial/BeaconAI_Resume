@@ -38,19 +38,25 @@ ResumeRenderData _threeEntryMasterFixture() => ResumeRenderData(
           id: 'net',
           title: 'Network Systems Engineer',
           company: 'US Army',
-          bullets: ['Configured and maintained tactical network switches'],
+          bullets: ['Configured and maintained tactical network switches']
+              .map((s) => BulletEntry(text: s))
+              .toList(),
         ),
         ExperienceEntry(
           id: 'helpdesk',
           title: 'Help Desk Technician',
           company: 'US Army',
-          bullets: ['Resolved end-user hardware and software tickets'],
+          bullets: ['Resolved end-user hardware and software tickets']
+              .map((s) => BulletEntry(text: s))
+              .toList(),
         ),
         ExperienceEntry(
           id: 'motor',
           title: 'Motor Transport Operator',
           company: 'US Army',
-          bullets: ['Operated and maintained heavy tactical vehicles'],
+          bullets: ['Operated and maintained heavy tactical vehicles']
+              .map((s) => BulletEntry(text: s))
+              .toList(),
         ),
       ],
       education: const [],

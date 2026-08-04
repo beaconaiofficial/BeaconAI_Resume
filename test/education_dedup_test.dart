@@ -113,6 +113,39 @@ void main() {
       final result = ResumeSanitizer.deduplicateEducation(entries);
       expect(result.length, 2);
     });
+
+    test('gpa/graduationYear returned as raw JSON numbers (not strings) do '
+        'not throw — reproduces a real Claude response observed during '
+        'Stage 1 live verification, where a genuine "double is not a '
+        'subtype of String?" crash emptied the entire parseFieldMappings '
+        'result for the whole document, not just this field', () {
+      final entries = [
+        {
+          'degree': 'Bachelor of Science',
+          'institution': 'American Military University',
+          'fieldOfStudy': 'Information Technology',
+          'graduationYear': 2026,
+          'gpa': 3.9772,
+        },
+        {
+          'degree': 'Bachelor of Science',
+          'institution': 'American Military University',
+          'fieldOfStudy': 'Information Technology',
+          'graduationYear': 2024,
+          'gpa': 3.94,
+        },
+      ];
+
+      expect(() => ResumeSanitizer.deduplicateEducation(entries),
+          returnsNormally);
+
+      final result = ResumeSanitizer.deduplicateEducation(entries);
+      // Both completed entries disagree on GPA — genuinely conflicting
+      // numeric-GPA records are surfaced, not silently resolved (same rule
+      // as the string-GPA conflict test), and the crash from casting a
+      // double as String? must not occur along the way.
+      expect(result.length, 2);
+    });
   });
 
   group('End-to-end via parseFieldMappings', () {

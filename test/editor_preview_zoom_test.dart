@@ -26,7 +26,11 @@ final _renderData = ResumeRenderData(
   contact: ContactInfo(firstName: 'Jane', lastName: 'Doe'),
   summary: 'A summary.',
   experience: [
-    ExperienceEntry(id: 'e1', title: 'Engineer', company: 'Acme', bullets: ['Did things']),
+    ExperienceEntry(
+        id: 'e1',
+        title: 'Engineer',
+        company: 'Acme',
+        bullets: ['Did things'].map((s) => BulletEntry(text: s)).toList()),
   ],
   education: const [],
   skills: const [],

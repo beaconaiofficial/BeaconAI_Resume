@@ -29,13 +29,14 @@ class ResumeAdapter extends TypeAdapter<Resume> {
       isArchived: fields[9] as bool,
       companyName: fields[10] as String?,
       roleTitle: fields[11] as String?,
+      timelineGapsCheckedAtUploadCount: (fields[12] as num?)?.toInt(),
     );
   }
 
   @override
   void write(BinaryWriter writer, Resume obj) {
     writer
-      ..writeByte(12)
+      ..writeByte(13)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -59,7 +60,9 @@ class ResumeAdapter extends TypeAdapter<Resume> {
       ..writeByte(10)
       ..write(obj.companyName)
       ..writeByte(11)
-      ..write(obj.roleTitle);
+      ..write(obj.roleTitle)
+      ..writeByte(12)
+      ..write(obj.timelineGapsCheckedAtUploadCount);
   }
 
   @override

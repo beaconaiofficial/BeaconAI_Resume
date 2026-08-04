@@ -87,13 +87,12 @@ class _WizardStepExperienceState extends State<WizardStepExperience> {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
         children: [
-          if (!widget.isUploadPath)
-            const SectionTipCard(
-              tip: 'Use the STAR method for achievement bullets: '
-                  'Situation → Task → Action → Result. '
-                  'Quantify results wherever possible (%, \$, headcount, time saved).',
-              icon: Icons.star_outline,
-            ),
+          const SectionTipCard(
+            tip: 'Use the STAR method for achievement bullets: '
+                'Situation → Task → Action → Result. '
+                'Quantify results wherever possible (%, \$, headcount, time saved).',
+            icon: Icons.star_outline,
+          ),
 
           // Experience cards
           for (int i = 0; i < _entries.length; i++) ...[
@@ -161,6 +160,11 @@ class _ExperienceCardState extends State<_ExperienceCard> {
   late final TextEditingController _endCtrl;
   late bool _isCurrent;
   late List<TextEditingController> _bulletCtrls;
+  // Kept index-aligned with _bulletCtrls (same add/removeAt operations
+  // applied to both) so a bullet's hasQuantifiableData/metricRequested
+  // flags survive add/remove/edit in this editor instead of being reset to
+  // defaults on every _notify() rebuild.
+  late List<BulletEntry> _bulletMeta;
   bool _isExpanded = true;
 
   @override
@@ -173,9 +177,10 @@ class _ExperienceCardState extends State<_ExperienceCard> {
     _startCtrl = TextEditingController(text: e.startDate);
     _endCtrl = TextEditingController(text: e.endDate ?? '');
     _isCurrent = e.isCurrent;
+    _bulletMeta = e.bullets.isEmpty ? [BulletEntry(text: '')] : e.bullets;
     _bulletCtrls = e.bullets.isEmpty
         ? [TextEditingController()]
-        : e.bullets.map((b) => TextEditingController(text: b)).toList();
+        : e.bullets.map((b) => TextEditingController(text: b.text)).toList();
 
     for (final ctrl in [
       _titleCtrl,
@@ -217,7 +222,17 @@ class _ExperienceCardState extends State<_ExperienceCard> {
       startDate: _startCtrl.text,
       endDate: _isCurrent ? null : _endCtrl.text,
       isCurrent: _isCurrent,
-      bullets: _bulletCtrls.map((c) => c.text).toList(),
+      bullets: [
+        for (int i = 0; i < _bulletCtrls.length; i++)
+          BulletEntry(
+            text: _bulletCtrls[i].text,
+            hasQuantifiableData: _bulletMeta[i].hasQuantifiableData,
+            // A manual edit in this dedicated editor resolves the
+            // metric-request prompt — the user is actively composing this
+            // bullet's wording, so it shouldn't nag them again later.
+            metricRequested: true,
+          ),
+      ],
       isAIPrefilled: false, // cleared on any edit
     ));
   }
@@ -225,13 +240,19 @@ class _ExperienceCardState extends State<_ExperienceCard> {
   void _addBullet() {
     final ctrl = TextEditingController();
     ctrl.addListener(_notify);
-    setState(() => _bulletCtrls.add(ctrl));
+    setState(() {
+      _bulletCtrls.add(ctrl);
+      _bulletMeta.add(BulletEntry(text: ''));
+    });
   }
 
   void _removeBullet(int i) {
     if (_bulletCtrls.length == 1) return;
     _bulletCtrls[i].dispose();
-    setState(() => _bulletCtrls.removeAt(i));
+    setState(() {
+      _bulletCtrls.removeAt(i);
+      _bulletMeta.removeAt(i);
+    });
     _notify();
   }
 

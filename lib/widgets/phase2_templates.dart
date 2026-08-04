@@ -231,9 +231,9 @@ Widget _expEntryWidget(
                       onTapField: onTapField,
                       fieldId:
                           'experience[$index].bullet.${e.bullets.indexOf(b)}',
-                      value: b,
+                      value: b.text,
                       isAIPrefilled: e.isAIPrefilled,
-                      child: Text(b, style: bodyStyle)),
+                      child: Text(b.text, style: bodyStyle)),
                 ),
               ],
             ),

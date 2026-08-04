@@ -51,7 +51,8 @@ ResumeRenderData _masterFixture() => ResumeRenderData(
           id: 'e1',
           title: 'Heavy Vehicle Driver',
           company: 'Logistics Co',
-          bullets: ['Drove trucks safely for 5 years'],
+          bullets:
+              ['Drove trucks safely for 5 years'].map((s) => BulletEntry(text: s)).toList(),
         ),
       ],
       education: const [],

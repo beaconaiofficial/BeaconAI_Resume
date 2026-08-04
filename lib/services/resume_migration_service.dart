@@ -99,8 +99,27 @@ class ResumeMigrationService {
   /// nothing left to reclassify, dedup finds no bare stubs, bullet cap is a
   /// no-op under the cap, and cert flags are only ever set once and then
   /// left alone on subsequent runs).
+  ///
+  /// Unlike CloudflareWorkerService.parseFieldMappings and
+  /// DocumentUploadScreen's pending-decision resolution (both unambiguously
+  /// Master-Resume-only — see their own doc comments), this migration
+  /// iterates every stored resume regardless of type (see runIfNeeded),
+  /// so it's the one place bullet capping genuinely needs to be gated on
+  /// [Resume.isMaster] rather than just removed: a Master Resume must
+  /// never have bullets capped (Stage 9 — exhaustive, no page limit); a
+  /// Tailored Resume legitimately targets a short bullet list (one page,
+  /// two-page max) — already enforced independently at generation time by
+  /// Phase2ApiService.generateTailoredResume (caps at 4 bullets, instructs
+  /// the model to fit one page), so capping here is only a defensive
+  /// backstop for a Tailored Resume hand-edited past that afterward, not
+  /// the primary mechanism.
   static Future<_ResumeSanitizeResult> _sanitizeResume(String resumeId) async {
     final box = HiveService.resumeSectionBox;
+    // Defaults to treating an unresolvable lookup as a Master Resume
+    // (never cap) rather than as Tailored (cap) — when the resume's type
+    // can't be confirmed, the safe direction to err is toward keeping
+    // content, not toward silently truncating an exhaustive record.
+    final isMasterResume = HiveService.resumeBox.get(resumeId)?.isMaster ?? true;
     var reclassified = 0;
     var deduped = 0;
     var crossDocMerged = 0;
@@ -141,14 +160,17 @@ class ResumeMigrationService {
       for (final raw in entries) {
         final e = raw as Map<String, dynamic>;
         final company = (e['company'] as String? ?? '').toLowerCase();
+        final title = (e['title'] as String? ?? '').toLowerCase();
         final isTraining = ResumeSanitizer.fallbackTrainingCompanyPatterns
-            .any((p) => company.contains(p));
+                .any((p) => company.contains(p)) ||
+            ResumeSanitizer.fallbackTrainingTitlePatterns
+                .any((p) => title.contains(p));
         if (isTraining) {
           promotedFromExperience.add({
             'id': 'uuid-placeholder',
             'name': e['title'] as String? ?? '',
             'issuer': e['company'] as String? ?? '',
-            'dateEarned': e['startDate'] as String? ?? '',
+            'dateEarned': ResumeSanitizer.coerceToString(e['startDate']) ?? '',
             'expiresDate': null,
             'credentialId': null,
             'isAIPrefilled': e['isAIPrefilled'] as bool? ?? false,
@@ -241,13 +263,16 @@ class ResumeMigrationService {
           afterCrossDocMerge, flaggedEntries);
       crossReferenceDropped += afterCrossDocMerge.length - afterCrossRef.length;
 
-      // Cap bullets on whatever survived dedup.
+      // Cap bullets on whatever survived dedup — Tailored Resumes only
+      // (see this function's doc comment). Master Resumes keep every
+      // bullet the model produced.
       final afterCap = afterCrossRef.map((raw) {
         final e = Map<String, dynamic>.from(raw as Map<String, dynamic>);
-        final bullets = (e['bullets'] as List<dynamic>?)
-                ?.map((b) => b.toString())
-                .toList() ??
-            [];
+        final bullets = ResumeSanitizer.normalizeBulletList(e['bullets']);
+        if (isMasterResume) {
+          e['bullets'] = bullets;
+          return e;
+        }
         final capped = ResumeSanitizer.capBullets(bullets);
         if (capped.length < bullets.length) bulletCapped++;
         e['bullets'] = capped;

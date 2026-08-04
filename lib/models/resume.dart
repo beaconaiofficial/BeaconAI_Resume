@@ -61,6 +61,18 @@ class Resume extends HiveObject {
   @HiveField(11)
   String? roleTitle;
 
+  /// The `uploadCount` value timeline-coverage-gap detection was last run
+  /// against for this resume (see ResumeSanitizer.detectTimelineGaps) — null
+  /// means never checked. uploadCount changes on both upload AND deletion
+  /// (see UploadManagerScreen/ResumeEditorScreen's delete handlers), so
+  /// comparing against the current uploadCount is enough to know source
+  /// documents have changed since the last check, without a separate
+  /// tracking mechanism. Not consulted anywhere yet in the upload-confirmation
+  /// flow itself (gaps are always recomputed fresh there); this exists so a
+  /// future surface outside that flow can skip recomputation cheaply.
+  @HiveField(12)
+  int? timelineGapsCheckedAtUploadCount;
+
   Resume({
     required this.id,
     required this.title,
@@ -74,6 +86,7 @@ class Resume extends HiveObject {
     this.isArchived = false,
     this.companyName,
     this.roleTitle,
+    this.timelineGapsCheckedAtUploadCount,
   });
 
   // ── Computed Properties ─────────────────────────────────────────────────────
@@ -128,6 +141,7 @@ class Resume extends HiveObject {
         'isArchived': isArchived,
         'companyName': companyName,
         'roleTitle': roleTitle,
+        'timelineGapsCheckedAtUploadCount': timelineGapsCheckedAtUploadCount,
       };
 
   factory Resume.fromBackupJson(Map<String, dynamic> json) => Resume(
@@ -144,5 +158,7 @@ class Resume extends HiveObject {
         isArchived: json['isArchived'] as bool? ?? false,
         companyName: json['companyName'] as String?,
         roleTitle: json['roleTitle'] as String?,
+        timelineGapsCheckedAtUploadCount:
+            json['timelineGapsCheckedAtUploadCount'] as int?,
       );
 }

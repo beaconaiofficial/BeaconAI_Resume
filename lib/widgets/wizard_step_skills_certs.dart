@@ -135,13 +135,12 @@ class _WizardStepSkillsState extends State<WizardStepSkills> {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
         children: [
-          if (!widget.isUploadPath)
-            const SectionTipCard(
-              tip: 'Aim for 8–12 skills that mirror the exact language '
-                  'of the job posting. Include specific software names '
-                  '(e.g. Workday, Salesforce) — these are direct ATS keyword hits.',
-              icon: Icons.tips_and_updates_outlined,
-            ),
+          const SectionTipCard(
+            tip: 'Aim for 8–12 skills that mirror the exact language '
+                'of the job posting. Include specific software names '
+                '(e.g. Workday, Salesforce) — these are direct ATS keyword hits.',
+            icon: Icons.tips_and_updates_outlined,
+          ),
 
           // Progress counter
           Row(

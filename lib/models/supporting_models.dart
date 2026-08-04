@@ -179,6 +179,91 @@ class PendingEntryDecision {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// UnplacedFinding  (ephemeral — NEVER persisted to Hive)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A specific number, figure, or factual claim Claude found in the source
+/// material but could not confidently map to a structured field (e.g. a GPA
+/// figure on a page that doesn't clearly belong to any single education
+/// entry). Surfaced on the document-upload confirmation screen alongside
+/// pending-entry-decision cards so the user places it — or discards it —
+/// explicitly, rather than it being silently dropped or silently folded
+/// into generated prose (the professional summary) where it can't be
+/// verified against a structured field.
+/// This class is intentionally NOT a HiveObject.
+class UnplacedFinding {
+  UnplacedFinding({
+    required this.id,
+    required this.value,
+    required this.context,
+  });
+
+  /// Stable id for keying the card in the UI and for removal once resolved.
+  final String id;
+
+  /// The specific figure/claim Claude found (e.g. "3.94 GPA").
+  final String value;
+
+  /// The surrounding source text the figure appeared in, so the user can
+  /// judge where it actually belongs.
+  final String context;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TimelineCoverageGap  (ephemeral — NEVER persisted to Hive)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Whether a [TimelineCoverageGap] sits between two separate experience
+/// entries, or inside a single entry whose date range was widened by
+/// cross-document merging (see ResumeSanitizer.mergeCrossDocumentDuplicateRoles)
+/// beyond what any of its contributing bullets actually narrate.
+enum TimelineGapKind { betweenEntries, withinEntry }
+
+/// How the user has responded to a surfaced gap. Ephemeral — a resolution
+/// only lives for the current upload/confirmation session, the same as
+/// [PendingEntryDecision]/[UnplacedFinding]; there is no cross-session
+/// "permanently dismissed" memory. If the same gap still exists next time
+/// source documents change, it's surfaced again fresh.
+enum TimelineGapStatus { unresolved, userProvidedDetail, userConfirmedNoGap, dismissed }
+
+/// A stretch of time with no narrative support (bullets, duties, awards)
+/// found in the resume's experience/education/certification entries — a
+/// real employment date gap missed entirely, or a single experience entry
+/// whose date range was widened by combining two source documents' dates
+/// (e.g. an STP's current-assignment dates) without any bullet actually
+/// describing that widened portion. Surfaced on the document-upload
+/// confirmation screen so the user explains it or confirms there's nothing
+/// missing — never silently left unexplained, and never silently assumed
+/// to be a real gap without asking either.
+/// This class is intentionally NOT a HiveObject.
+class TimelineCoverageGap {
+  TimelineCoverageGap({
+    required this.id,
+    required this.startDate,
+    required this.endDate,
+    required this.kind,
+    required this.adjacentEntryIds,
+    this.status = TimelineGapStatus.unresolved,
+  });
+
+  /// Stable id for keying the card in the UI and for removal once resolved.
+  final String id;
+
+  final DateTime startDate;
+  final DateTime endDate;
+
+  final TimelineGapKind kind;
+
+  /// The experience entry id(s) this gap relates to: two ids for
+  /// [TimelineGapKind.betweenEntries] (the entries on either side of the
+  /// gap), or exactly one id for [TimelineGapKind.withinEntry] (the entry
+  /// whose widened range isn't fully covered by its own bullets).
+  final List<String> adjacentEntryIds;
+
+  TimelineGapStatus status;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CoverLetter
 // ─────────────────────────────────────────────────────────────────────────────
 

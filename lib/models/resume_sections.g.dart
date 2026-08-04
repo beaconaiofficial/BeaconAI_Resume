@@ -174,7 +174,7 @@ class ExperienceEntryAdapter extends TypeAdapter<ExperienceEntry> {
       startDate: fields[4] as String,
       endDate: fields[5] as String?,
       isCurrent: fields[6] as bool,
-      bullets: (fields[7] as List?)?.cast<String>(),
+      bullets: (fields[7] as List?)?.cast<BulletEntry>(),
       isAIPrefilled: fields[8] as bool,
     );
   }

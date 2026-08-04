@@ -137,7 +137,7 @@ class ContactInfo extends HiveObject {
         professionalTitle: json['professionalTitle'] as String? ?? '',
         city: json['city'] as String? ?? '',
         state: json['state'] as String? ?? '',
-        phone: json['phone'] as String? ?? '',
+        phone: _s(json['phone']) ?? '',
         email: json['email'] as String? ?? '',
         linkedInUrl: json['linkedInUrl'] as String?,
         websiteUrl: json['websiteUrl'] as String?,
@@ -208,13 +208,79 @@ class SkillEntry extends HiveObject {
 
   factory SkillEntry.fromJson(Map<String, dynamic> json) => SkillEntry(
         id: json['id'] as String,
-        name: json['name'] as String,
+        name: _s(json['name']) ?? '',
         category: SkillCategoryEnum.values.firstWhere(
           (e) => e.name == json['category'],
           orElse: () => SkillCategoryEnum.uncategorized,
         ),
         isAIPrefilled: json['isAIPrefilled'] as bool? ?? false,
       );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BulletEntry
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One achievement bullet within an ExperienceEntry (STAR method).
+///
+/// [hasQuantifiableData] is Claude's own assessment at extraction time —
+/// false when it could not find or infer a quantifiable result (%, $,
+/// headcount, time, scale) for this specific bullet from the source
+/// material, even though the bullet was still worth keeping for its
+/// independent skill/scope value. [metricRequested] tracks whether the user
+/// has already been asked (and supplied a metric or dismissed the prompt)
+/// for a [hasQuantifiableData]-false bullet, so the same bullet never
+/// re-prompts on a later visit once resolved.
+///
+/// Not a Hive type of its own — like the other resume content models, this
+/// only ever exists inside the JSON string stored in ResumeSection.data,
+/// never as a directly Hive-boxed object.
+class BulletEntry {
+  String text;
+  bool hasQuantifiableData;
+  bool metricRequested;
+
+  BulletEntry({
+    required this.text,
+    this.hasQuantifiableData = true,
+    this.metricRequested = false,
+  });
+
+  bool get isEmpty => text.trim().isEmpty;
+  bool get isNotEmpty => text.trim().isNotEmpty;
+
+  @override
+  String toString() => text;
+
+  Map<String, dynamic> toJson() => {
+        'text': text,
+        'hasQuantifiableData': hasQuantifiableData,
+        'metricRequested': metricRequested,
+      };
+
+  /// Accepts either the legacy flat-string shape (bullets stored before
+  /// this structure existed, or a raw value from anywhere that hasn't gone
+  /// through the object-shaped extraction path) or the new object shape.
+  /// A legacy string is marked hasQuantifiableData: false, metricRequested:
+  /// false — "not yet evaluated for a metric," not "confirmed missing data"
+  /// — so it's eligible to surface the same metric-request prompt a freshly
+  /// extracted unquantified bullet would, rather than being silently
+  /// grandfathered out of the flow.
+  factory BulletEntry.fromJson(dynamic json) {
+    if (json is Map) {
+      final map = json as Map<String, dynamic>;
+      return BulletEntry(
+        text: map['text'] as String? ?? '',
+        hasQuantifiableData: map['hasQuantifiableData'] as bool? ?? true,
+        metricRequested: map['metricRequested'] as bool? ?? false,
+      );
+    }
+    return BulletEntry(
+      text: json?.toString() ?? '',
+      hasQuantifiableData: false,
+      metricRequested: false,
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -248,7 +314,7 @@ class ExperienceEntry extends HiveObject {
   /// Achievement bullets. One achievement per item (STAR method).
   /// Rule §11: Users reorder via cut/copy/paste — no drag-to-reorder.
   @HiveField(7)
-  List<String> bullets;
+  List<BulletEntry> bullets;
 
   /// True if this entry was created by Claude extraction.
   /// Rule §4: cleared when user edits any field in this entry.
@@ -263,7 +329,7 @@ class ExperienceEntry extends HiveObject {
     this.startDate = '',
     this.endDate,
     this.isCurrent = false,
-    List<String>? bullets,
+    List<BulletEntry>? bullets,
     this.isAIPrefilled = false,
   }) : bullets = bullets ?? [];
 
@@ -280,7 +346,7 @@ class ExperienceEntry extends HiveObject {
         'startDate': startDate,
         'endDate': endDate,
         'isCurrent': isCurrent,
-        'bullets': bullets,
+        'bullets': bullets.map((b) => b.toJson()).toList(),
         'isAIPrefilled': isAIPrefilled,
       };
 
@@ -294,7 +360,7 @@ class ExperienceEntry extends HiveObject {
         endDate: _s(json['endDate']),
         isCurrent: json['isCurrent'] as bool? ?? false,
         bullets: (json['bullets'] as List<dynamic>?)
-                ?.map((e) => e as String)
+                ?.map((e) => BulletEntry.fromJson(e))
                 .toList() ??
             [],
         isAIPrefilled: json['isAIPrefilled'] as bool? ?? false,
@@ -454,7 +520,7 @@ class CertificationEntry extends HiveObject {
         issuer: json['issuer'] as String? ?? '',
         dateEarned: _s(json['dateEarned']) ?? '',
         expiresDate: _s(json['expiresDate']),
-        credentialId: json['credentialId'] as String?,
+        credentialId: _s(json['credentialId']),
         isAIPrefilled: json['isAIPrefilled'] as bool? ?? false,
         needsComplianceReview: json['needsComplianceReview'] as bool? ?? false,
         complianceReviewReason: json['complianceReviewReason'] as String?,

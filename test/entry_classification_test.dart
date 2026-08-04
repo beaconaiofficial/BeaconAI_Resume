@@ -284,4 +284,239 @@ void main() {
       expect(result.pendingDecisions, isEmpty);
     });
   });
+
+  group('7. Title-based training fallback (real STP shape: duty title '
+      '"RA Trainee", no company name signal)', () {
+    test('a trainee-titled entry with no entryType and no training-pattern '
+        'company name is still routed to certifications, not left as a '
+        'standalone job', () {
+      final json = _resumeJson(experience: [
+        {
+          'id': 'x1',
+          'title': 'RA Trainee',
+          'company': 'US Army',
+          'startDate': '2019',
+          'endDate': null,
+          'isCurrent': false,
+          'bullets': const [],
+        },
+      ]);
+
+      final result = CloudflareWorkerService.parseFieldMappings(json);
+
+      final expRow = _mappingValue(result.mappings, 'experience');
+      expect(expRow, isNull,
+          reason: 'the only experience entry was a trainee title and must '
+              'have been promoted to certifications, not survive as a job');
+
+      final certRow = _mappingValue(result.mappings, 'certifications');
+      expect(certRow, isNotNull);
+      final certs = certRow!['suggestedValue'] as List;
+      expect(certs.any((c) => c['name'] == 'RA Trainee'), isTrue);
+      expect(result.pendingDecisions, isEmpty);
+    });
+
+    test('a real job title is unaffected by the trainee-title fallback', () {
+      final json = _resumeJson(experience: [
+        {
+          'id': 'x1',
+          'title': 'Network Systems Engineer',
+          'company': 'Acme Corp',
+          'startDate': '2019',
+          'endDate': '2022',
+          'isCurrent': false,
+          'bullets': ['Maintained enterprise network infrastructure'],
+        },
+      ]);
+
+      final result = CloudflareWorkerService.parseFieldMappings(json);
+
+      final expRow = _mappingValue(result.mappings, 'experience');
+      expect(expRow, isNotNull);
+      final exp = expRow!['suggestedValue'] as List;
+      expect(exp.any((e) => e['title'] == 'Network Systems Engineer'), isTrue);
+    });
+  });
+
+  group('8. .mil email flagged as an informational, non-blocking nudge', () {
+    test('a .mil contact email is marked with milEmailWarning', () {
+      final json = jsonEncode({
+        'contact': {
+          'firstName': 'Test',
+          'lastName': 'User',
+          'email': 'test.user@mail.mil',
+        },
+        'summary': '',
+        'experience': <dynamic>[],
+        'education': <dynamic>[],
+        'skills': <dynamic>[],
+        'certifications': <dynamic>[],
+      });
+
+      final result = CloudflareWorkerService.parseFieldMappings(json);
+
+      final emailRow = _mappingValue(result.mappings, 'contact.email');
+      expect(emailRow, isNotNull);
+      expect(emailRow!['milEmailWarning'], isTrue);
+      expect(emailRow['accepted'], isTrue,
+          reason: 'the .mil flag is informational only and must not block '
+              'the field from being accepted/applied');
+    });
+
+    test('a civilian email is not flagged', () {
+      final json = jsonEncode({
+        'contact': {
+          'firstName': 'Test',
+          'lastName': 'User',
+          'email': 'test.user@gmail.com',
+        },
+        'summary': '',
+        'experience': <dynamic>[],
+        'education': <dynamic>[],
+        'skills': <dynamic>[],
+        'certifications': <dynamic>[],
+      });
+
+      final result = CloudflareWorkerService.parseFieldMappings(json);
+
+      final emailRow = _mappingValue(result.mappings, 'contact.email');
+      expect(emailRow, isNotNull);
+      expect(emailRow!['milEmailWarning'], isNot(true));
+    });
+  });
+
+  group('8b. documentType — Stage 1 source-of-truth priority prerequisite',
+      () {
+    test('a recognized documentType value round-trips onto the parse result',
+        () {
+      final json = jsonEncode({
+        'documentType': 'stp',
+        'contact': {'firstName': 'Test', 'lastName': 'User'},
+        'summary': '',
+        'experience': <dynamic>[],
+        'education': <dynamic>[],
+        'skills': <dynamic>[],
+        'certifications': <dynamic>[],
+      });
+
+      final result = CloudflareWorkerService.parseFieldMappings(json);
+
+      expect(result.documentType, 'stp');
+    });
+
+    test('a missing documentType parses to null rather than crashing', () {
+      final json = jsonEncode({
+        'contact': {'firstName': 'Test', 'lastName': 'User'},
+        'summary': '',
+        'experience': <dynamic>[],
+        'education': <dynamic>[],
+        'skills': <dynamic>[],
+        'certifications': <dynamic>[],
+      });
+
+      final result = CloudflareWorkerService.parseFieldMappings(json);
+
+      expect(result.documentType, isNull);
+    });
+  });
+
+  group('9. Unplaced findings — a number/claim that does not cleanly map to '
+      'a structured field', () {
+    test('surfaces as an UnplacedFinding, not folded into the summary', () {
+      final json = jsonEncode({
+        'contact': {'firstName': 'Test', 'lastName': 'User'},
+        'summary': 'A generalist with a strong academic record.',
+        'experience': <dynamic>[],
+        'education': <dynamic>[],
+        'skills': <dynamic>[],
+        'certifications': <dynamic>[],
+        'unplacedFindings': [
+          {
+            'value': '3.94 GPA',
+            'context': 'achieving the dean\'s list with a 3.94 GPA in '
+                'Information Technology',
+          },
+        ],
+      });
+
+      final result = CloudflareWorkerService.parseFieldMappings(json);
+
+      expect(result.unplacedFindings.length, 1);
+      final finding = result.unplacedFindings.first;
+      expect(finding.value, '3.94 GPA');
+      expect(finding.context, contains('Information Technology'));
+      expect(finding.id, isNotEmpty);
+    });
+
+    test('an empty unplacedFindings array produces no findings', () {
+      final json = jsonEncode({
+        'contact': {'firstName': 'Test', 'lastName': 'User'},
+        'summary': '',
+        'experience': <dynamic>[],
+        'education': <dynamic>[],
+        'skills': <dynamic>[],
+        'certifications': <dynamic>[],
+        'unplacedFindings': <dynamic>[],
+      });
+
+      final result = CloudflareWorkerService.parseFieldMappings(json);
+
+      expect(result.unplacedFindings, isEmpty);
+    });
+
+    test('a finding with an empty value is dropped rather than surfaced as '
+        'a blank card', () {
+      final json = jsonEncode({
+        'contact': {'firstName': 'Test', 'lastName': 'User'},
+        'summary': '',
+        'experience': <dynamic>[],
+        'education': <dynamic>[],
+        'skills': <dynamic>[],
+        'certifications': <dynamic>[],
+        'unplacedFindings': [
+          {'value': '', 'context': 'some context with no real value'},
+        ],
+      });
+
+      final result = CloudflareWorkerService.parseFieldMappings(json);
+
+      expect(result.unplacedFindings, isEmpty);
+    });
+  });
+
+  group('10. Bullets extracted as objects (text + hasQuantifiableData)', () {
+    test('a bullet with hasQuantifiableData: false survives extraction '
+        'and is not discarded', () {
+      final json = _resumeJson(experience: [
+        {
+          'id': 'e1',
+          'title': 'Network Systems Engineer',
+          'company': 'Acme Corp',
+          'startDate': '2019',
+          'endDate': '2022',
+          'isCurrent': false,
+          'bullets': [
+            {
+              'text': 'Maintained enterprise network infrastructure',
+              'hasQuantifiableData': false,
+            },
+            {
+              'text': 'Reduced downtime by 40% across 12 data centers',
+              'hasQuantifiableData': true,
+            },
+          ],
+        },
+      ]);
+
+      final result = CloudflareWorkerService.parseFieldMappings(json);
+
+      final expRow = _mappingValue(result.mappings, 'experience');
+      expect(expRow, isNotNull);
+      final exp = expRow!['suggestedValue'] as List;
+      final bullets = (exp.first as Map)['bullets'] as List;
+      expect(bullets.length, 2);
+      expect((bullets[0] as Map)['hasQuantifiableData'], isFalse);
+      expect((bullets[1] as Map)['hasQuantifiableData'], isTrue);
+    });
+  });
 }

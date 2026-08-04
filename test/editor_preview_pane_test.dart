@@ -211,10 +211,10 @@ void main() {
           id: 'e$i',
           title: 'Role $i',
           company: 'Company $i',
-          bullets: const [
+          bullets: [
             'Did a substantial, detailed thing worth a full line of text',
             'Did another substantial, detailed thing worth a full line',
-          ],
+          ].map((s) => BulletEntry(text: s)).toList(),
         ),
       ),
       education: const [],
@@ -243,5 +243,98 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
 
     expect(hasScrollIndicator(tester), isTrue);
+  });
+
+  group('onPageCountChanged — feeds ResumeEditorScreen\'s Tailored-Resume '
+      'length nudge (Issue 3)', () {
+    testWidgets('fires with the first-frame heuristic estimate before any '
+        'measurement has run', (tester) async {
+      final reported = <int>[];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              height: 800,
+              child: EditorPreviewPane(
+                resume: _resumeFixture(),
+                renderData: _sparseManyEntriesFixture(),
+                isDark: false,
+                onPageCountChanged: reported.add,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      // The callback is scheduled via a post-frame callback, not called
+      // synchronously during build — one pump delivers it.
+      await tester.pump();
+
+      expect(reported, isNotEmpty);
+      expect(reported.first, 8,
+          reason: 'same first-frame heuristic value _pageCardCount already '
+              'asserts on above: 1 + ceil(20/3), clamped');
+    });
+
+    testWidgets('fires again with the settled (measured) count once '
+        'measurement overrides the heuristic', (tester) async {
+      final reported = <int>[];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              height: 800,
+              child: EditorPreviewPane(
+                resume: _resumeFixture(),
+                renderData: _sparseManyEntriesFixture(),
+                isDark: false,
+                onPageCountChanged: reported.add,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(reported.last, lessThan(8),
+          reason: 'once the real rendered height overrides the heuristic, '
+              'later callback invocations report the settled, lower count — '
+              'this is exactly the value ResumeEditorScreen\'s length-nudge '
+              'banner keys off of');
+    });
+
+    testWidgets('a minimal one-page resume never reports more than 1 page',
+        (tester) async {
+      final reported = <int>[];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              height: 800,
+              child: EditorPreviewPane(
+                resume: _resumeFixture(),
+                renderData: _minimalFixture(),
+                isDark: false,
+                onPageCountChanged: reported.add,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(reported.last, 1);
+    });
   });
 }

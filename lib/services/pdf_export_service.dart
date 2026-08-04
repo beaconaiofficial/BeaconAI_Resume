@@ -76,33 +76,44 @@ class PdfExportService {
       pw.MultiPage(
         pageFormat: PdfPageFormat.letter,
         margin: const pw.EdgeInsets.symmetric(horizontal: 56, vertical: 52),
-        build: (context) => [
-          // ── Sender header ──────────────────────────────────────────────
-          if (senderContact.fullName.isNotEmpty)
+        // Repeats on every page — see the matching comment in
+        // generateResumePdf for why this must be header:, not the first
+        // item in build:.
+        header: (context) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            if (senderContact.fullName.isNotEmpty)
+              pw.Text(
+                senderContact.fullName,
+                style:
+                    pw.TextStyle(font: boldFont, fontSize: 16, color: _navy),
+              ),
+            if (senderContact.professionalTitle.isNotEmpty) ...[
+              pw.SizedBox(height: 2),
+              pw.Text(
+                senderContact.professionalTitle,
+                style: pw.TextStyle(
+                    font: semiBoldFont, fontSize: 10, color: _accent),
+              ),
+            ],
+            pw.SizedBox(height: 4),
             pw.Text(
-              senderContact.fullName,
-              style: pw.TextStyle(font: boldFont, fontSize: 16, color: _navy),
+              [
+                senderContact.email,
+                senderContact.phone,
+                senderContact.linkedInUrl,
+              ]
+                  .where((s) => s != null && s.isNotEmpty)
+                  .cast<String>()
+                  .join('   |   '),
+              style: pw.TextStyle(font: regularFont, fontSize: 9, color: _gray),
             ),
-          if (senderContact.professionalTitle.isNotEmpty) ...[
-            pw.SizedBox(height: 2),
-            pw.Text(
-              senderContact.professionalTitle,
-              style: pw.TextStyle(font: semiBoldFont, fontSize: 10, color: _accent),
-            ),
+            pw.SizedBox(height: 4),
+            pw.Divider(color: _lightGray, thickness: 0.6),
+            pw.SizedBox(height: 16),
           ],
-          pw.SizedBox(height: 4),
-          pw.Text(
-            [
-              senderContact.email,
-              senderContact.phone,
-              senderContact.linkedInUrl,
-            ].where((s) => s != null && s.isNotEmpty).cast<String>().join('   |   '),
-            style: pw.TextStyle(font: regularFont, fontSize: 9, color: _gray),
-          ),
-          pw.SizedBox(height: 4),
-          pw.Divider(color: _lightGray, thickness: 0.6),
-          pw.SizedBox(height: 16),
-
+        ),
+        build: (context) => [
           // ── Date ────────────────────────────────────────────────────────
           pw.Text(
             dateStr,
@@ -184,14 +195,22 @@ class PdfExportService {
       pw.MultiPage(
         pageFormat: PdfPageFormat.letter,
         margin: const pw.EdgeInsets.symmetric(horizontal: 48, vertical: 48),
+        // Repeats on every page — re-invoked by MultiPage per page, rather
+        // than being the first item in build:'s content flow (which only
+        // ever rendered once, on whichever page it happened to land on).
+        // Without this, a resume that spans multiple pages has no name/
+        // contact info on page 2+, so a separated page can't be identified.
+        header: (context) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            _buildContactHeader(
+                data.contact, boldFont, regularFont, semiBoldFont),
+            pw.SizedBox(height: 14),
+            pw.Divider(color: _lightGray, thickness: 0.8),
+            pw.SizedBox(height: 10),
+          ],
+        ),
         build: (context) => [
-          // ── Contact Header ──────────────────────────────────────────────
-          _buildContactHeader(
-              data.contact, boldFont, regularFont, semiBoldFont),
-          pw.SizedBox(height: 14),
-          pw.Divider(color: _lightGray, thickness: 0.8),
-          pw.SizedBox(height: 10),
-
           // ── Summary ────────────────────────────────────────────────────
           if (data.summary.isNotEmpty) ...[
             _sectionHeader('PROFESSIONAL SUMMARY', semiBoldFont),
@@ -362,7 +381,7 @@ class PdfExportService {
                               font: regularFont, fontSize: 10, color: _gray)),
                       pw.Expanded(
                         child: pw.Text(
-                          b,
+                          b.text,
                           style: pw.TextStyle(
                               font: regularFont,
                               fontSize: 10,

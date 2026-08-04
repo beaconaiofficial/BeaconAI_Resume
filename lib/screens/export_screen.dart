@@ -16,6 +16,7 @@ import '../services/pdf_export_service.dart';
 import '../services/docx_export_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/resume_template_renderer.dart';
+import '../widgets/wizard_widgets.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ExportScreen
@@ -282,6 +283,15 @@ class _ExportScreenState extends ConsumerState<ExportScreen> {
                       ],
 
                       // ── Format picker ──────────────────────────────────────
+                      const SectionTipCard(
+                        tip: 'PDF: best for most applications — preserves '
+                            'formatting everywhere. DOCX (Word): use if the '
+                            'employer\'s application system asks for it '
+                            'specifically, or if you want to make further '
+                            'edits in Word. Plain text: rarely needed — only '
+                            'if a system explicitly rejects PDF/DOCX uploads.',
+                        icon: Icons.file_present_outlined,
+                      ),
                       Text(
                         'Export format',
                         style: GoogleFonts.inter(
