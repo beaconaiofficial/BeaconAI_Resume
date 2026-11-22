@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -82,6 +84,10 @@ Future<void> main() async {
 // Root App Widget
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Root navigator key — lets app-shell widgets that live outside the
+/// Navigator (e.g. [_AgeSignalBootstrap]) present a dialog.
+final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
+
 class BeaconAIResumeApp extends ConsumerWidget {
   const BeaconAIResumeApp({super.key});
 
@@ -112,6 +118,7 @@ class BeaconAIResumeApp extends ConsumerWidget {
     };
 
     return MaterialApp(
+      navigatorKey: rootNavigatorKey,
       title: AppConstants.appName,
       debugShowCheckedModeBanner: false,
 
@@ -145,6 +152,11 @@ class BeaconAIResumeApp extends ConsumerWidget {
           child: Stack(
             children: [
               if (child != null) child,
+              // ── Age Assurance ──────────────────────────────────────────────
+              // Renders nothing. Fires the store/OS age-signal request after
+              // the first frame (once privacy is accepted) and shows the
+              // one-time restricted-mode notice. Never blocks launch.
+              const _AgeSignalBootstrap(),
               // ── Global Offline Banner ───────────────────────────────────────
               // Non-blocking, dismissible. Shown app-wide when offline.
               // NOTE: _OfflineBanner lives outside the Navigator's Overlay in
@@ -352,5 +364,102 @@ class _OfflineBannerState extends ConsumerState<_OfflineBanner> {
         ),
       ),
     );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Age Signal Bootstrap
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Non-visual app-shell hook for age assurance (CA AB 1043 et al.).
+///  - Requests the age signal once per launch, fire-and-forget, after the
+///    first frame — and only once the privacy policy is accepted, because the
+///    store/OS may show a prompt. Covers new installs (fires the moment the
+///    policy is accepted), existing installs, and signal changes.
+///  - Shows the one-time restricted-mode notice when the stored bracket is a
+///    signaled minor and the notice hasn't been shown yet. Leaving restricted
+///    mode (turned 18) is silent.
+class _AgeSignalBootstrap extends ConsumerStatefulWidget {
+  const _AgeSignalBootstrap();
+
+  @override
+  ConsumerState<_AgeSignalBootstrap> createState() =>
+      _AgeSignalBootstrapState();
+}
+
+class _AgeSignalBootstrapState extends ConsumerState<_AgeSignalBootstrap> {
+  bool _noticeInFlight = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _refresh();
+      _maybeShowNotice();
+    });
+  }
+
+  void _refresh() {
+    unawaited(ref.read(userSettingsProvider.notifier).refreshAgeSignal());
+  }
+
+  void _maybeShowNotice({int attempt = 0}) {
+    if (_noticeInFlight || !mounted) return;
+    final s = ref.read(userSettingsProvider);
+    if (!s.ageBracket.isRestricted || s.ageRestrictionNoticeShown) return;
+
+    final overlayContext = rootNavigatorKey.currentState?.overlay?.context;
+    if (overlayContext == null) {
+      // Navigator not mounted yet — retry on a later frame (bounded).
+      if (attempt < 10) {
+        WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _maybeShowNotice(attempt: attempt + 1));
+      }
+      return;
+    }
+
+    _noticeInFlight = true;
+    showDialog<void>(
+      context: overlayContext,
+      builder: (ctx) => AlertDialog(
+        title: const Text(AppConstants.ageRestrictionNoticeTitle),
+        content: const Text(AppConstants.ageRestrictionNoticeBody),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    ).whenComplete(() async {
+      _noticeInFlight = false;
+      if (!mounted) return;
+      await ref
+          .read(userSettingsProvider.notifier)
+          .markAgeRestrictionNoticeShown();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // New install: the policy gets accepted mid-session → request then.
+    ref.listen<bool>(
+      userSettingsProvider.select((s) => s.privacyAccepted),
+      (prev, next) {
+        if (next && prev != true) _refresh();
+      },
+    );
+    // Bracket became a minor (or notice still pending) → show the notice.
+    ref.listen<({bool restricted, bool shown})>(
+      userSettingsProvider.select((s) => (
+            restricted: s.ageBracket.isRestricted,
+            shown: s.ageRestrictionNoticeShown,
+          )),
+      (_, next) {
+        if (next.restricted && !next.shown) _maybeShowNotice();
+      },
+    );
+    return const SizedBox.shrink();
   }
 }

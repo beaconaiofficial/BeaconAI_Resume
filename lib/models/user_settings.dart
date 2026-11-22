@@ -103,6 +103,25 @@ class UserSettings extends HiveObject {
   @HiveField(17, defaultValue: false)
   bool aiDataSharingAccepted;
 
+  // ── Age Assurance ───────────────────────────────────────────────────────────
+  // Device-only. Deliberately excluded from toBackupJson() — a backup file
+  // leaves the device. defaultValue keeps pre-existing records readable
+  // (retroactive migration: old installs read as unknown / never checked).
+
+  /// Age bracket from the app store / OS age signal. unknown = no usable
+  /// signal → current behavior, nothing restricted.
+  @HiveField(18, defaultValue: AgeBracketEnum.unknown)
+  AgeBracketEnum ageBracket;
+
+  /// When the store/OS last gave a definitive answer (not an error/timeout).
+  @HiveField(19)
+  DateTime? ageSignalCheckedAt;
+
+  /// True once the one-time restricted-mode notice has been shown. Reset when
+  /// the bracket leaves restricted mode (user turned 18).
+  @HiveField(20, defaultValue: false)
+  bool ageRestrictionNoticeShown;
+
   UserSettings({
     this.privacyAccepted = false,
     this.privacyAcceptedAt,
@@ -122,6 +141,9 @@ class UserSettings extends HiveObject {
     this.screenReaderHintsEnabled = true,
     this.experienceSanitizedVersion = 0,
     this.aiDataSharingAccepted = false,
+    this.ageBracket = AgeBracketEnum.unknown,
+    this.ageSignalCheckedAt,
+    this.ageRestrictionNoticeShown = false,
   }) : billingCycleStart = billingCycleStart ?? DateTime.now();
 
   // ── Computed Properties ─────────────────────────────────────────────────────

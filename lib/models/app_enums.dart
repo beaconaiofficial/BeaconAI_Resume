@@ -293,3 +293,46 @@ enum AppThemeEnum {
   @HiveField(2)
   dark,
 }
+
+// ── Age Bracket (from app store / OS age signal) ──────────────────────────────
+// Stored on-device only. Never serialized into backups or sent off-device.
+
+@HiveType(typeId: AppConstants.ageBracketEnumTypeId)
+enum AgeBracketEnum {
+  /// No usable signal (not shared, not applicable, unavailable, web, …).
+  /// Current app behavior — nothing restricted.
+  @HiveField(0)
+  unknown,
+
+  @HiveField(1)
+  under13,
+
+  @HiveField(2)
+  age13to15,
+
+  @HiveField(3)
+  age16to17,
+
+  @HiveField(4)
+  adult,
+}
+
+extension AgeBracketEnumX on AgeBracketEnum {
+  bool get isMinor =>
+      this == AgeBracketEnum.under13 ||
+      this == AgeBracketEnum.age13to15 ||
+      this == AgeBracketEnum.age16to17;
+
+  bool get isTeen =>
+      this == AgeBracketEnum.age13to15 || this == AgeBracketEnum.age16to17;
+
+  /// Restricted mode: every signaled minor. Drives full ad suppression and the
+  /// one-time notice.
+  bool get isRestricted => isMinor;
+
+  /// AI upload/generation blocked. Under-13 always; 13–17 unless
+  /// [AppConstants.aiEnabledForSignaledTeens] is flipped on.
+  bool get isAiBlocked =>
+      this == AgeBracketEnum.under13 ||
+      (isTeen && !AppConstants.aiEnabledForSignaledTeens);
+}

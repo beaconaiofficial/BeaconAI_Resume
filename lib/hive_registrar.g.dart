@@ -17,6 +17,7 @@ extension HiveRegistrar on HiveInterface {
     registerAdapter(AddOnTypeEnumAdapter());
     registerAdapter(ExportFormatEnumAdapter());
     registerAdapter(AppThemeEnumAdapter());
+    registerAdapter(AgeBracketEnumAdapter());
     registerAdapter(ResumeAdapter());
     registerAdapter(ResumeSectionAdapter());
     registerAdapter(ContactInfoAdapter());

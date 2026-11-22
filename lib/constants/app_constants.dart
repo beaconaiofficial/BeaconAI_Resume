@@ -50,6 +50,29 @@ class AppConstants {
   static const int addOnTypeEnumTypeId = 27;
   static const int exportFormatEnumTypeId = 28;
   static const int appThemeEnumTypeId = 29;
+  static const int ageBracketEnumTypeId = 30;
+
+  // ── Age Assurance (CA AB 1043 / Brazil Digital ECA / AL HB 161) ──────────────
+  // The age bracket comes from the app store / OS (Play Age Signals, Apple
+  // Declared Age Range), is stored ONLY on this device, and is never sent to
+  // the Cloudflare Worker, Claude, RevenueCat, AdMob, analytics, or backups.
+  static const String ageSignalsChannel = 'dev.getbeaconai/age_signals';
+
+  /// Single switch for the minor gate on AI features. While false, every
+  /// signaled minor (0–17) is in restricted mode for AI. Flip to true ONLY
+  /// once Anthropic's minor-user safeguards are in place (age verification,
+  /// content moderation, AI disclosure, public compliance statement, audits)
+  /// to re-enable AI for 13–17. Under-13 stays blocked either way. Ads stay
+  /// suppressed for all minors regardless of this flag.
+  static const bool aiEnabledForSignaledTeens = false;
+
+  // TODO(age-assurance): copy pending owner approval.
+  static const String ageRestrictionNoticeTitle =
+      "Some features aren't available";
+  static const String ageRestrictionNoticeBody =
+      "Some features aren't available on this account based on the age "
+      'information from your app store. You can still build and export '
+      'resumes manually.';
 
   // ── Named Routes ──────────────────────────────────────────────────────────────
   static const String routePrivacyPolicy = '/privacy';
