@@ -43,6 +43,9 @@ void main() {
     if (!Hive.isAdapterRegistered(AppConstants.sectionTypeEnumTypeId)) {
       Hive.registerAdapter(SectionTypeEnumAdapter());
     }
+    if (!Hive.isAdapterRegistered(AppConstants.ageBracketEnumTypeId)) {
+      Hive.registerAdapter(AgeBracketEnumAdapter());
+    }
     if (!Hive.isAdapterRegistered(AppConstants.userSettingsTypeId)) {
       Hive.registerAdapter(UserSettingsAdapter());
     }
