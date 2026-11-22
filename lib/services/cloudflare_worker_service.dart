@@ -2,9 +2,11 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 import '../constants/app_constants.dart';
+import '../models/app_enums.dart';
 import '../models/supporting_models.dart';
 import '../utils/app_logger.dart';
 import 'dev_extraction_cache.dart';
+import 'hive_service.dart';
 import 'resume_sanitizer.dart';
 import 'session_extraction_cache.dart';
 
@@ -583,6 +585,32 @@ class CloudflareWorkerService {
     return '<user_content>$sanitizedText</user_content>';
   }
 
+  // ── Age assurance gate ─────────────────────────────────────────────────────
+
+  /// Whether AI calls are blocked for the stored age bracket. Overridable in
+  /// tests. Defaults to the on-device bracket; if Hive isn't open (unit tests
+  /// that never call HiveService.init) it reports not-blocked. The bracket
+  /// itself is never included in any request.
+  static bool Function() isAiBlocked = _aiBlockedFromSettings;
+
+  static bool _aiBlockedFromSettings() {
+    try {
+      return HiveService.settings.ageBracket.isAiBlocked;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Backstop for every Worker POST: throws [AiRestrictedException] (a
+  /// [CloudflareApiException], so every existing screen handler surfaces its
+  /// neutral message) before any document content leaves the device.
+  static void _ensureAiAllowed() {
+    if (isAiBlocked()) {
+      devLog('[AGE SIGNAL] AI call blocked (restricted mode)');
+      throw const AiRestrictedException();
+    }
+  }
+
   // ── Core request ───────────────────────────────────────────────────────────
 
   /// Sends a prompt to Claude via the Cloudflare Worker proxy.
@@ -598,6 +626,7 @@ class CloudflareWorkerService {
     void Function()? onCancel,
     Duration? timeout,
   }) async {
+    _ensureAiAllowed();
     final body = jsonEncode({
       'model': model,
       'max_tokens': maxTokens,
@@ -668,6 +697,7 @@ class CloudflareWorkerService {
     required String userMessage,
     int maxTokens = 4000,
   }) async {
+    _ensureAiAllowed();
     final body = jsonEncode({
       'model': _modelGenerate,
       'max_tokens': maxTokens,
@@ -868,6 +898,7 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
   /// needed: the Worker forwards the full messages array unchanged.
   /// Uses [_webSearchTimeout] (60 s) — PDF payloads are larger than text.
   static Future<String> extractResumeFieldsFromPdf(List<int> pdfBytes) async {
+    _ensureAiAllowed();
     const systemPrompt = '''
 You are an expert document parser. Extract all resume or professional background information from the provided PDF document and return it as a structured JSON object.
 
@@ -1067,6 +1098,7 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
     List<int> imageBytes,
     String mediaType,
   ) async {
+    _ensureAiAllowed();
     const systemPrompt = '''
 You are an expert resume parser. Extract all resume information from the provided image and return it as a structured JSON object.
 
@@ -1747,6 +1779,14 @@ class ExtractionParseResult {
 // ─────────────────────────────────────────────────────────────────────────────
 // CloudflareApiException
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Thrown instead of calling the Worker while the stored age bracket blocks AI
+/// (age-assurance restricted mode). Message is the same neutral copy as the
+/// one-time notice.
+class AiRestrictedException extends CloudflareApiException {
+  const AiRestrictedException()
+      : super(AppConstants.ageRestrictionNoticeBody);
+}
 
 class CloudflareApiException implements Exception {
   const CloudflareApiException(this.message);
