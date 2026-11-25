@@ -14,6 +14,7 @@ import '../models/supporting_models.dart';
 import '../providers/user_settings_provider.dart';
 import '../services/hive_service.dart';
 import '../theme/app_colors.dart';
+import '../utils/preview_navigation.dart';
 import '../widgets/wizard_widgets.dart';
 import '../widgets/wizard_step_contact_summary.dart';
 import '../widgets/wizard_step_experience_education.dart';
@@ -347,11 +348,7 @@ class _ResumeBuilderWizardScreenState
 
   void _navigateToPreview() {
     if (!mounted) return;
-    Navigator.pushReplacementNamed(
-      context,
-      AppConstants.routePreviewEdit,
-      arguments: {'resumeId': _resumeId},
-    );
+    openPreviewAfterWizard(Navigator.of(context), _resumeId);
   }
 
   // ─────────────────────────────────────────────────────────────────────────
