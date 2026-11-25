@@ -6,9 +6,24 @@ class AppConstants {
 
   // ── App Info ─────────────────────────────────────────────────────────────────
   static const String appName = 'BeaconAI Resume';
-  static const String privacyPolicyUrl = 'https://getbeaconai.dev/privacy';
+  static const String privacyPolicyUrl = 'https://getbeaconai.com/privacy';
   static const String termsOfUseUrl =
       'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/';
+  static const String websiteUrl = 'https://getbeaconai.com';
+
+  // ── Store Listings ─────────────────────────────────────────────────────────
+  static const String androidPackageName = 'dev.getbeaconai.beaconai_resume';
+  static const String playStoreUrl =
+      'https://play.google.com/store/apps/details?id=$androidPackageName';
+
+  /// Apple ID of the App Store listing. Taken from the public listing
+  /// (apps.apple.com/app/beaconai-resume/id6782361658, looked up by bundle id
+  /// dev.getbeaconai.beaconai-resume on 2026-11-24).
+  // TODO(store-links): confirm against App Store Connect → Apps →
+  // BeaconAI Resume → App Information → General Information → "Apple ID".
+  static const String appStoreId = '6782361658';
+  static const String appStoreUrl = 'https://apps.apple.com/app/id$appStoreId';
+
   static const String backupFileName = 'BeaconAI_Resume_Backup';
   static const String backupDataFileName = 'beaconai_data.json';
   static const String backupVersion = '1.0';

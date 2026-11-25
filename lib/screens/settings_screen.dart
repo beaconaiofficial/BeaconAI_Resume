@@ -12,8 +12,8 @@ import '../services/external_link_service.dart';
 import '../services/hive_service.dart';
 import '../theme/app_colors.dart';
 
-const String _websiteUrl = 'https://getbeaconai.dev';
-const String _websiteDisplay = 'getbeaconai.dev';
+const String _websiteUrl = AppConstants.websiteUrl;
+const String _websiteDisplay = 'getbeaconai.com';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SettingsScreen

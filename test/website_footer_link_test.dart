@@ -1,5 +1,5 @@
 // Website footer link (Settings, below every real section): quiet,
-// centered, tappable text opening getbeaconai.dev via url_launcher — the
+// centered, tappable text opening getbeaconai.com via url_launcher — the
 // same package/pattern as the bug-report mailto link — with the same
 // copyable-text fallback dialog when no browser handler is available
 // (the common case on web/desktop). launchUrlFn is a swappable static
@@ -49,22 +49,22 @@ void main() {
         return true;
       };
 
-      final result = await ExternalLinkService.open('https://getbeaconai.dev');
+      final result = await ExternalLinkService.open('https://getbeaconai.com');
 
       expect(result, isTrue);
-      expect(captured, Uri.parse('https://getbeaconai.dev'));
+      expect(captured, Uri.parse('https://getbeaconai.com'));
     });
 
     test('returns false when the platform launch reports failure', () async {
       ExternalLinkService.launchUrlFn = (uri) async => false;
-      expect(await ExternalLinkService.open('https://getbeaconai.dev'), isFalse);
+      expect(await ExternalLinkService.open('https://getbeaconai.com'), isFalse);
     });
 
     test('returns false instead of throwing when the platform launch '
         'itself throws', () async {
       ExternalLinkService.launchUrlFn =
           (uri) async => throw PlatformException(code: 'no_handler');
-      expect(await ExternalLinkService.open('https://getbeaconai.dev'), isFalse);
+      expect(await ExternalLinkService.open('https://getbeaconai.com'), isFalse);
     });
   });
 
@@ -131,7 +131,7 @@ void main() {
 
     const footerText =
         'For more information or to see our other apps, please visit '
-        'getbeaconai.dev';
+        'getbeaconai.com';
 
     Future<void> pumpSettings(WidgetTester tester, {bool dark = false}) async {
       await tester.pumpWidget(
@@ -167,7 +167,7 @@ void main() {
       final semanticsWidget = tester.widget<Semantics>(find.byWidgetPredicate(
           (w) =>
               w is Semantics &&
-              (w.properties.label ?? '').contains('getbeaconai.dev')));
+              (w.properties.label ?? '').contains('getbeaconai.com')));
       expect(semanticsWidget.properties.button, isTrue);
     });
 
@@ -190,7 +190,7 @@ void main() {
       expect(text.style?.fontSize, 11.5);
     });
 
-    testWidgets('tapping it launches getbeaconai.dev and shows no fallback '
+    testWidgets('tapping it launches getbeaconai.com and shows no fallback '
         'when the launch succeeds', (tester) async {
       Uri? captured;
       ExternalLinkService.launchUrlFn = (uri) async {
@@ -203,7 +203,7 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(captured, Uri.parse('https://getbeaconai.dev'));
+      expect(captured, Uri.parse('https://getbeaconai.com'));
       expect(find.byType(AlertDialog), findsNothing);
     });
 
@@ -217,13 +217,13 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
 
       expect(find.byType(AlertDialog), findsOneWidget);
-      expect(find.text('getbeaconai.dev'), findsWidgets);
+      expect(find.text('getbeaconai.com'), findsWidgets);
 
       await tester.tap(find.text('Copy Link'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
 
-      expect(clipboardText, 'getbeaconai.dev');
+      expect(clipboardText, 'getbeaconai.com');
       expect(find.byType(AlertDialog), findsNothing);
     });
   });
