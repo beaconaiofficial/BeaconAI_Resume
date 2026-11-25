@@ -1,10 +1,7 @@
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:printing/printing.dart';
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
 import 'package:uuid/uuid.dart';
 
 import '../constants/app_constants.dart';
@@ -14,6 +11,7 @@ import '../providers/connectivity_provider.dart';
 import '../services/cloudflare_worker_service.dart';
 import '../services/hive_service.dart';
 import '../services/phase3_api_service.dart';
+import '../services/study_guide_pdf_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/resume_template_renderer.dart';
 
@@ -213,7 +211,7 @@ class _InterviewPrepProScreenState
     final guide = _activeGuide;
     if (guide == null) return;
 
-    final bytes = await _buildStudyGuidePdf(guide);
+    final bytes = await StudyGuidePdfService.build(guide);
     final fileName =
         'Interview_Prep_${guide.companyName.isNotEmpty ? guide.companyName.replaceAll(' ', '_') : 'Guide'}.pdf';
 
@@ -222,105 +220,6 @@ class _InterviewPrepProScreenState
     guide.exportedAt = DateTime.now();
     await guide.save();
     if (mounted) setState(() {});
-  }
-
-  Future<Uint8List> _buildStudyGuidePdf(InterviewStudyGuide guide) async {
-    final doc = pw.Document(
-      title: 'Interview Prep — ${guide.roleTitle}',
-    );
-
-    final regularFont = await PdfGoogleFonts.interRegular();
-    final boldFont = await PdfGoogleFonts.interBold();
-    final semiBoldFont = await PdfGoogleFonts.interSemiBold();
-
-    const navy = PdfColor.fromInt(0xFF1A1A2E);
-    const accent = PdfColor.fromInt(0xFF2C4A7C);
-    const gray = PdfColor.fromInt(0xFF6B7280);
-    const lightGray = PdfColor.fromInt(0xFFE5E7EB);
-
-    pw.Widget categoryBadge(QuestionCategoryEnum category) {
-      final label = switch (category) {
-        QuestionCategoryEnum.behavioral => 'BEHAVIORAL',
-        QuestionCategoryEnum.roleSpecific => 'ROLE-SPECIFIC',
-        QuestionCategoryEnum.companySpecific => 'COMPANY-SPECIFIC',
-      };
-      return pw.Container(
-        padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: pw.BoxDecoration(
-          color: accent,
-          borderRadius: pw.BorderRadius.circular(3),
-        ),
-        child: pw.Text(label,
-            style: pw.TextStyle(
-                font: boldFont, fontSize: 7, color: PdfColors.white)),
-      );
-    }
-
-    doc.addPage(
-      pw.MultiPage(
-        pageFormat: PdfPageFormat.letter,
-        margin: const pw.EdgeInsets.symmetric(horizontal: 48, vertical: 48),
-        // Repeats on every page — see the matching comment in
-        // PdfExportService.generateResumePdf for why this must be header:,
-        // not the first item in build:.
-        header: (context) => pw.Column(
-          crossAxisAlignment: pw.CrossAxisAlignment.start,
-          children: [
-            pw.Text('Interview Preparation Guide',
-                style:
-                    pw.TextStyle(font: boldFont, fontSize: 22, color: navy)),
-            pw.SizedBox(height: 4),
-            pw.Text(
-              [guide.roleTitle, guide.companyName]
-                  .where((s) => s.isNotEmpty)
-                  .join(' at '),
-              style: pw.TextStyle(
-                  font: semiBoldFont, fontSize: 13, color: accent),
-            ),
-            pw.SizedBox(height: 12),
-            pw.Divider(color: lightGray, thickness: 0.8),
-            pw.SizedBox(height: 16),
-          ],
-        ),
-        build: (context) => [
-          for (final q in guide.questions) ...[
-            pw.Container(
-              margin: const pw.EdgeInsets.only(bottom: 16),
-              padding: const pw.EdgeInsets.all(12),
-              decoration: pw.BoxDecoration(
-                border: pw.Border.all(color: lightGray, width: 0.8),
-                borderRadius: pw.BorderRadius.circular(6),
-              ),
-              child: pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  categoryBadge(q.category),
-                  pw.SizedBox(height: 6),
-                  pw.Text(q.questionText,
-                      style: pw.TextStyle(
-                          font: semiBoldFont, fontSize: 12, color: navy)),
-                  if (q.answerGuide.isNotEmpty) ...[
-                    pw.SizedBox(height: 6),
-                    pw.Text('How to answer:',
-                        style: pw.TextStyle(
-                            font: semiBoldFont, fontSize: 9, color: accent)),
-                    pw.SizedBox(height: 3),
-                    pw.Text(q.answerGuide,
-                        style: pw.TextStyle(
-                            font: regularFont,
-                            fontSize: 10,
-                            color: gray,
-                            lineSpacing: 2)),
-                  ],
-                ],
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-
-    return doc.save();
   }
 
   // ─────────────────────────────────────────────────────────────────────────
