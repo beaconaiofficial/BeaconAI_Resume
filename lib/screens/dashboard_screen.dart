@@ -98,7 +98,15 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       _ when tier.isBasic => AppConstants.routeInterviewPrepBasic,
       _ => AppConstants.routeInterviewTipsFree,
     };
-    Navigator.pushNamed(context, route);
+    // Pro prep is personalized from a resume (and its saved study guides are
+    // keyed by resume id), so hand it the master resume, same as the ATS
+    // scanner. Without a master the Pro screen shows its own resume picker.
+    final master = ref.read(activeMasterResumeProvider);
+    Navigator.pushNamed(
+      context,
+      route,
+      arguments: tier.isPro && master != null ? {'resumeId': master.id} : null,
+    );
   }
 
   void _onUpgrade() {

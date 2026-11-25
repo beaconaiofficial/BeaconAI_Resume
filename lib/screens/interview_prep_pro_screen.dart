@@ -9,8 +9,10 @@ import 'package:uuid/uuid.dart';
 
 import '../constants/app_constants.dart';
 import '../models/app_enums.dart';
+import '../models/resume.dart';
 import '../models/supporting_models.dart';
 import '../providers/connectivity_provider.dart';
+import '../providers/resume_provider.dart';
 import '../services/cloudflare_worker_service.dart';
 import '../services/hive_service.dart';
 import '../services/phase3_api_service.dart';
@@ -46,6 +48,7 @@ class _InterviewPrepProScreenState
     extends ConsumerState<InterviewPrepProScreen> {
   String? _resumeId;
   ResumeRenderData? _renderData;
+  bool _argsApplied = false;
 
   final _jdController = TextEditingController();
   bool _isGenerating = false;
@@ -57,7 +60,8 @@ class _InterviewPrepProScreenState
   void didChangeDependencies() {
     super.didChangeDependencies();
     final args = ModalRoute.of(context)?.settings.arguments;
-    if (args is Map<String, dynamic>) {
+    if (args is Map<String, dynamic> && !_argsApplied) {
+      _argsApplied = true;
       _resumeId = args['resumeId'] as String?;
       final jobText = args['jobPostingText'] as String?;
       if (jobText != null && jobText.isNotEmpty) {
@@ -65,10 +69,37 @@ class _InterviewPrepProScreenState
       }
     }
 
-    if (_resumeId != null && _renderData == null) {
-      _renderData = ResumeRenderData.fromHive(_resumeId!);
+    final resumeId = _resumeId;
+    if (resumeId != null && _renderData == null) {
+      // A stale id (resume deleted since) falls back to the picker.
+      if (HiveService.resumeBox.get(resumeId) == null) {
+        _resumeId = null;
+        return;
+      }
+      _renderData = ResumeRenderData.fromHive(resumeId);
       _loadMostRecentGuide();
     }
+  }
+
+  /// Picks (or switches) the resume this guide is personalized from, and
+  /// shows that resume's most recent saved guide if it has one.
+  void _selectResume(String resumeId) {
+    setState(() {
+      _resumeId = resumeId;
+      _renderData = ResumeRenderData.fromHive(resumeId);
+      _activeGuide = null;
+      _errorMessage = null;
+    });
+    _loadMostRecentGuide();
+  }
+
+  void _clearResumeSelection() {
+    setState(() {
+      _resumeId = null;
+      _renderData = null;
+      _activeGuide = null;
+      _errorMessage = null;
+    });
   }
 
   @override
@@ -111,8 +142,11 @@ class _InterviewPrepProScreenState
       return;
     }
 
-    if (_renderData == null) {
-      setState(() => _errorMessage = 'Resume data not available.');
+    final resumeId = _resumeId;
+    final renderData = _renderData;
+    if (resumeId == null || renderData == null) {
+      setState(() =>
+          _errorMessage = 'Choose a resume first, then generate your guide.');
       return;
     }
 
@@ -128,9 +162,9 @@ class _InterviewPrepProScreenState
         Phase3ApiService.extractCompanyAndRole(jobPostingText: jd),
         Phase3ApiService.generateProInterviewGuide(
           jobDescription: jd,
-          resumeSummary: _renderData!.summary,
-          resumeSkills: _renderData!.skills.map((s) => s.name).toList(),
-          resumeExperience: _renderData!.experience
+          resumeSummary: renderData.summary,
+          resumeSkills: renderData.skills.map((s) => s.name).toList(),
+          resumeExperience: renderData.experience
               .map((e) => '${e.title} at ${e.company}: ${e.bullets.join(' ')}')
               .join('\n'),
         ),
@@ -159,7 +193,7 @@ class _InterviewPrepProScreenState
 
       final guide = InterviewStudyGuide(
         id: _uuid.v4(),
-        resumeId: _resumeId!,
+        resumeId: resumeId,
         companyName: companyRole['company'] ?? '',
         roleTitle: companyRole['role'] ?? '',
         generatedAt: DateTime.now(),
@@ -359,7 +393,24 @@ class _InterviewPrepProScreenState
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 40),
         children: [
-          if (_activeGuide == null) ...[
+          if (_resumeId == null) ...[
+            _ResumePicker(
+              resumes: ref
+                  .watch(resumeListProvider)
+                  .where((r) => !r.isArchived)
+                  .toList()
+                ..sort((a, b) =>
+                    a.isMaster == b.isMaster ? 0 : (a.isMaster ? -1 : 1)),
+              isDark: isDark,
+              onSelected: _selectResume,
+            ),
+          ] else if (_activeGuide == null) ...[
+            _SelectedResumeRow(
+              title: HiveService.resumeBox.get(_resumeId)?.displayTitle ??
+                  'Resume',
+              onChange: _isGenerating ? null : _clearResumeSelection,
+            ),
+            const SizedBox(height: 8),
             _JobPostingInput(
               controller: _jdController,
               isGenerating: _isGenerating,
@@ -437,6 +488,109 @@ class _InterviewPrepProScreenState
     }
 
     return widgets;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resume picker — shown when the screen was opened without a resume id.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ResumePicker extends StatelessWidget {
+  const _ResumePicker({
+    required this.resumes,
+    required this.isDark,
+    required this.onSelected,
+  });
+
+  final List<Resume> resumes;
+  final bool isDark;
+  final ValueChanged<String> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final surface = isDark ? AppColors.surfaceDark : AppColors.surfaceLight;
+    final border = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final accent = isDark ? AppColors.accentDark : AppColors.accentLightColor;
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Which resume should we prep you from?',
+            style: GoogleFonts.playfairDisplay(
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+              color: Theme.of(context).colorScheme.onSurface,
+            )),
+        const SizedBox(height: 6),
+        Text(
+          'Answer guides are drawn from the resume you pick. '
+          'Saved study guides for that resume open automatically.',
+          style: GoogleFonts.inter(fontSize: 13, height: 1.5, color: muted),
+        ),
+        const SizedBox(height: 14),
+        if (resumes.isEmpty)
+          Text(
+            'You don\'t have a resume yet. Create one from Home first.',
+            style: GoogleFonts.inter(fontSize: 13, color: muted),
+          )
+        else
+          for (final r in resumes)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Material(
+                color: surface,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(color: border),
+                ),
+                child: ListTile(
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  leading: Icon(
+                    r.isMaster ? Icons.description_outlined : Icons.tune,
+                    color: accent,
+                  ),
+                  title: Text(r.displayTitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(
+                          fontSize: 14, fontWeight: FontWeight.w500)),
+                  subtitle: Text(
+                      r.isMaster ? 'Master resume' : 'Tailored resume',
+                      style: GoogleFonts.inter(fontSize: 12, color: muted)),
+                  trailing: Icon(Icons.chevron_right, color: muted),
+                  onTap: () => onSelected(r.id),
+                ),
+              ),
+            ),
+      ],
+    );
+  }
+}
+
+class _SelectedResumeRow extends StatelessWidget {
+  const _SelectedResumeRow({required this.title, required this.onChange});
+
+  final String title;
+  final VoidCallback? onChange;
+
+  @override
+  Widget build(BuildContext context) {
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    return Row(
+      children: [
+        Icon(Icons.description_outlined, size: 16, color: muted),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text('Prepping from: $title',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: GoogleFonts.inter(fontSize: 12, color: muted)),
+        ),
+        TextButton(onPressed: onChange, child: const Text('Change')),
+      ],
+    );
   }
 }
 
