@@ -211,9 +211,11 @@ class AppConstants {
 
   // ── Cloudflare Worker ─────────────────────────────────────────────────────────
   // Rule §1: Never call api.anthropic.com directly. Always use the Worker URL.
-  // Replace with your deployed Cloudflare Worker URL before release.
+  // Resume's own Worker (source: worker/ in this repo). Up to 1.0.1 the app
+  // used the shared beaconai-proxy Worker, which now forwards "/" here for
+  // those installs. Never point this at beaconai-proxy again.
   static const String cloudflareWorkerUrl =
-      'https://beaconai-proxy.beaconai-official.workers.dev';
+      'https://beaconai-resume-proxy.beaconai-official.workers.dev';
 
   // Sent as the `X-BeaconAI-Secret` header on every Worker request. The
   // Worker's only other protection is a wildcard CORS header, which stops
