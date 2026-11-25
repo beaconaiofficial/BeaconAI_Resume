@@ -98,9 +98,6 @@ final class AgeSignalsChannel: NSObject, FlutterPlugin {
         @unknown default:
           reply.send(["status": "unavailable", "errorCode": "UNKNOWN_RESPONSE"])
         }
-      } catch let error as AgeRangeService.Error where error == .declinedOnboarding {
-        // The person declined the onboarding flow — an explicit "no".
-        reply.send(["status": "notShared", "errorCode": "DECLINED_ONBOARDING"])
       } catch {
         reply.send(failure(error, step: "request"))
       }
@@ -110,17 +107,19 @@ final class AgeSignalsChannel: NSObject, FlutterPlugin {
     private static func failure(_ error: Error, step: String) -> [String: Any] {
       let code: String
       if let ageError = error as? AgeRangeService.Error {
+        // Only the iOS 26.0 cases. declinedOnboarding, invalidAccount and
+        // network are iOS 27.0 SDK additions and don't compile on Xcode 26;
+        // they (and any later case) land in the default branch as "error",
+        // which Dart treats like every other failure: keep the last stored
+        // bracket, never crash.
         switch ageError {
-        case .notAvailable: code = "NOT_AVAILABLE"
-        case .invalidRequest: code = "INVALID_REQUEST"
-        case .declinedOnboarding: code = "DECLINED_ONBOARDING"
-        case .invalidAccount: code = "INVALID_ACCOUNT"
-        case .network: code = "NETWORK"
-        @unknown default: code = "AGE_RANGE_UNKNOWN"
-        }
-        if ageError == .notAvailable || ageError == .invalidAccount {
-          debugLog("unavailable in step=\(step) code=\(code)")
-          return ["status": "unavailable", "errorCode": code]
+        case .notAvailable:
+          debugLog("unavailable in step=\(step) code=NOT_AVAILABLE")
+          return ["status": "unavailable", "errorCode": "NOT_AVAILABLE"]
+        case .invalidRequest:
+          code = "INVALID_REQUEST"
+        default:
+          code = "AGE_RANGE_\(String(describing: ageError))"
         }
       } else if error is AgeSignalTimeout {
         code = "TIMEOUT_\(step)"
