@@ -1,0 +1,27 @@
+# beaconai-resume-proxy — BeaconAI Resume's own AI proxy.
+# Deploy from this folder: npx wrangler deploy
+# Secrets are never written here. Set them once with:
+#   npx wrangler secret put ANTHROPIC_API_KEY
+#   npx wrangler secret put APP_SHARED_SECRET   (must equal
+#     AppConstants.cloudflareWorkerSharedSecret in the app)
+#
+# NEVER deploy anything else under this name, and never deploy this folder
+# under the name "beaconai-proxy" (that is BeaconAI Tools' Worker, which
+# forwards "/" here for old Resume installs).
+
+name = "beaconai-resume-proxy"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "491e716a04ad41f8a3b2982fc3f1f62e"
+
+[vars]
+# Daily limits (UTC days). Adjust here and redeploy; no code change needed.
+PER_IP_DAILY = "150"   # one PDF upload can take ~10 calls
+GLOBAL_DAILY = "3000"  # ceiling on Anthropic spend per day across all users
