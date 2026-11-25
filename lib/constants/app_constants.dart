@@ -66,7 +66,6 @@ class AppConstants {
   /// suppressed for all minors regardless of this flag.
   static const bool aiEnabledForSignaledTeens = false;
 
-  // TODO(age-assurance): copy pending owner approval.
   static const String ageRestrictionNoticeTitle =
       "Some features aren't available";
   static const String ageRestrictionNoticeBody =
