@@ -470,3 +470,57 @@ class AppThemeEnumAdapter extends TypeAdapter<AppThemeEnum> {
           runtimeType == other.runtimeType &&
           typeId == other.typeId;
 }
+
+class AgeBracketEnumAdapter extends TypeAdapter<AgeBracketEnum> {
+  @override
+  final int typeId = 30;
+
+  @override
+  AgeBracketEnum read(BinaryReader reader) {
+    switch (reader.readByte()) {
+      case 0:
+        return AgeBracketEnum.unknown;
+      case 1:
+        return AgeBracketEnum.under13;
+      case 2:
+        return AgeBracketEnum.age13to15;
+      case 3:
+        return AgeBracketEnum.age16to17;
+      case 4:
+        return AgeBracketEnum.adult;
+      default:
+        return AgeBracketEnum.unknown;
+    }
+  }
+
+  @override
+  void write(BinaryWriter writer, AgeBracketEnum obj) {
+    switch (obj) {
+      case AgeBracketEnum.unknown:
+        writer.writeByte(0);
+        break;
+      case AgeBracketEnum.under13:
+        writer.writeByte(1);
+        break;
+      case AgeBracketEnum.age13to15:
+        writer.writeByte(2);
+        break;
+      case AgeBracketEnum.age16to17:
+        writer.writeByte(3);
+        break;
+      case AgeBracketEnum.adult:
+        writer.writeByte(4);
+        break;
+    }
+  }
+
+  @override
+  int get hashCode => typeId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AgeBracketEnumAdapter &&
+          runtimeType == other.runtimeType &&
+          typeId == other.typeId;
+}

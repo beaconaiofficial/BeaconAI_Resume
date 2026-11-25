@@ -53,3 +53,9 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // Play Age Signals (CA AB 1043 / Brazil Digital ECA / AL HB 161).
+    // Bridged in AgeSignalsChannel.kt. 0.0.6 adds getApplicableAgeFeatures().
+    implementation("com.google.android.play:age-signals:0.0.6")
+}

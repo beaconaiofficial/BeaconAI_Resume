@@ -34,6 +34,9 @@ void main() {
     if (!Hive.isAdapterRegistered(AppConstants.appThemeEnumTypeId)) {
       Hive.registerAdapter(AppThemeEnumAdapter());
     }
+    if (!Hive.isAdapterRegistered(AppConstants.ageBracketEnumTypeId)) {
+      Hive.registerAdapter(AgeBracketEnumAdapter());
+    }
     if (!Hive.isAdapterRegistered(AppConstants.userSettingsTypeId)) {
       Hive.registerAdapter(UserSettingsAdapter());
     }

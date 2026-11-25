@@ -52,3 +52,8 @@ android/app/*.jks
 # machine-specific paths and debug ports. Not part of the app.
 .claude/settings.local.json
 .mcp.json
+
+# Ad shoot (marketing/ad-shots): videos and voice-over audio are large and
+# stay local. Screenshots, icon, ad-brief.md and vo_lines.txt are tracked.
+marketing/ad-shots/*.mp4
+marketing/ad-shots/voice/

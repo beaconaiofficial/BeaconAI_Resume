@@ -20,6 +20,15 @@ class AiConsentDialog {
   AiConsentDialog._();
 
   static Future<bool> ensureConsent(BuildContext context, WidgetRef ref) async {
+    // Age assurance restricted mode: AI is unavailable — never ask for AI
+    // consent; explain neutrally and let the caller bail out. Manual entry
+    // never reaches here, so it keeps working.
+    if (ref.read(aiBlockedByAgeProvider)) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text(AppConstants.ageRestrictionNoticeBody)),
+      );
+      return false;
+    }
     if (ref.read(userSettingsProvider).aiDataSharingAccepted) return true;
 
     final allowed = await showDialog<bool>(

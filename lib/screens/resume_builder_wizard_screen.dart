@@ -133,6 +133,8 @@ class _ResumeBuilderWizardScreenState
 
   void _preloadAd() {
     if (kIsWeb) return; // google_mobile_ads has no web platform channel
+    // Age assurance restricted mode: no ad request is made at all.
+    if (ref.read(ageRestrictedProvider)) return;
     InterstitialAd.load(
       adUnitId: Theme.of(context).platform == TargetPlatform.iOS
           ? AppConstants.admobInterstitialIdIos
@@ -149,6 +151,14 @@ class _ResumeBuilderWizardScreenState
         },
       ),
     );
+  }
+
+  /// Drops a preloaded interstitial (e.g. the age bracket flipped to a minor
+  /// mid-session after the ad was requested).
+  void _discardPreloadedAd() {
+    _interstitialAd?.dispose();
+    _interstitialAd = null;
+    _adLoaded = false;
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -332,9 +342,11 @@ class _ResumeBuilderWizardScreenState
 
     if (!mounted) return;
 
-    // Ad gate — Rule §6: check tier before every ad trigger
-    final tier = ref.read(currentTierProvider);
-    if (tier.isFree && _adLoaded && _interstitialAd != null) {
+    // Ad gate — Rule §6: check tier before every ad trigger.
+    // adSuppressedProvider = paid tier OR age-assurance restricted mode.
+    final adSuppressed = ref.read(adSuppressedProvider);
+    if (adSuppressed) _discardPreloadedAd();
+    if (!adSuppressed && _adLoaded && _interstitialAd != null) {
       _interstitialAd!.fullScreenContentCallback = FullScreenContentCallback(
         onAdDismissedFullScreenContent: (_) => _navigateToPreview(),
         onAdFailedToShowFullScreenContent: (_, __) => _navigateToPreview(),
@@ -410,6 +422,12 @@ class _ResumeBuilderWizardScreenState
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    // Age assurance: entering restricted mode mid-session discards any
+    // interstitial that was preloaded before the bracket was known.
+    ref.listen<bool>(ageRestrictedProvider, (_, restricted) {
+      if (restricted) _discardPreloadedAd();
+    });
 
     return Scaffold(
       backgroundColor:

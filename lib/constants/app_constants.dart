@@ -6,9 +6,24 @@ class AppConstants {
 
   // ── App Info ─────────────────────────────────────────────────────────────────
   static const String appName = 'BeaconAI Resume';
-  static const String privacyPolicyUrl = 'https://getbeaconai.dev/privacy';
+  static const String privacyPolicyUrl = 'https://getbeaconai.com/privacy';
   static const String termsOfUseUrl =
       'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/';
+  static const String websiteUrl = 'https://getbeaconai.com';
+
+  // ── Store Listings ─────────────────────────────────────────────────────────
+  static const String androidPackageName = 'dev.getbeaconai.beaconai_resume';
+  static const String playStoreUrl =
+      'https://play.google.com/store/apps/details?id=$androidPackageName';
+
+  /// Apple ID of the App Store listing. Taken from the public listing
+  /// (apps.apple.com/app/beaconai-resume/id6782361658, looked up by bundle id
+  /// dev.getbeaconai.beaconai-resume on 2026-11-24).
+  // TODO(store-links): confirm against App Store Connect → Apps →
+  // BeaconAI Resume → App Information → General Information → "Apple ID".
+  static const String appStoreId = '6782361658';
+  static const String appStoreUrl = 'https://apps.apple.com/app/id$appStoreId';
+
   static const String backupFileName = 'BeaconAI_Resume_Backup';
   static const String backupDataFileName = 'beaconai_data.json';
   static const String backupVersion = '1.0';
@@ -50,6 +65,28 @@ class AppConstants {
   static const int addOnTypeEnumTypeId = 27;
   static const int exportFormatEnumTypeId = 28;
   static const int appThemeEnumTypeId = 29;
+  static const int ageBracketEnumTypeId = 30;
+
+  // ── Age Assurance (CA AB 1043 / Brazil Digital ECA / AL HB 161) ──────────────
+  // The age bracket comes from the app store / OS (Play Age Signals, Apple
+  // Declared Age Range), is stored ONLY on this device, and is never sent to
+  // the Cloudflare Worker, Claude, RevenueCat, AdMob, analytics, or backups.
+  static const String ageSignalsChannel = 'dev.getbeaconai/age_signals';
+
+  /// Single switch for the minor gate on AI features. While false, every
+  /// signaled minor (0–17) is in restricted mode for AI. Flip to true ONLY
+  /// once Anthropic's minor-user safeguards are in place (age verification,
+  /// content moderation, AI disclosure, public compliance statement, audits)
+  /// to re-enable AI for 13–17. Under-13 stays blocked either way. Ads stay
+  /// suppressed for all minors regardless of this flag.
+  static const bool aiEnabledForSignaledTeens = false;
+
+  static const String ageRestrictionNoticeTitle =
+      "Some features aren't available";
+  static const String ageRestrictionNoticeBody =
+      "Some features aren't available on this account based on the age "
+      'information from your app store. You can still build and export '
+      'resumes manually.';
 
   // ── Named Routes ──────────────────────────────────────────────────────────────
   static const String routePrivacyPolicy = '/privacy';
@@ -189,9 +226,11 @@ class AppConstants {
 
   // ── Cloudflare Worker ─────────────────────────────────────────────────────────
   // Rule §1: Never call api.anthropic.com directly. Always use the Worker URL.
-  // Replace with your deployed Cloudflare Worker URL before release.
+  // Resume's own Worker (source: worker/ in this repo). Up to 1.0.1 the app
+  // used the shared beaconai-proxy Worker, which now forwards "/" here for
+  // those installs. Never point this at beaconai-proxy again.
   static const String cloudflareWorkerUrl =
-      'https://beaconai-proxy.beaconai-official.workers.dev';
+      'https://beaconai-resume-proxy.beaconai-official.workers.dev';
 
   // Sent as the `X-BeaconAI-Secret` header on every Worker request. The
   // Worker's only other protection is a wildcard CORS header, which stops

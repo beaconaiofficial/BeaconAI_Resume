@@ -36,13 +36,19 @@ class UserSettingsAdapter extends TypeAdapter<UserSettings> {
       experienceSanitizedVersion:
           fields[16] == null ? 0 : (fields[16] as num).toInt(),
       aiDataSharingAccepted: fields[17] == null ? false : fields[17] as bool,
+      ageBracket: fields[18] == null
+          ? AgeBracketEnum.unknown
+          : fields[18] as AgeBracketEnum,
+      ageSignalCheckedAt: fields[19] as DateTime?,
+      ageRestrictionNoticeShown:
+          fields[20] == null ? false : fields[20] as bool,
     );
   }
 
   @override
   void write(BinaryWriter writer, UserSettings obj) {
     writer
-      ..writeByte(18)
+      ..writeByte(21)
       ..writeByte(0)
       ..write(obj.privacyAccepted)
       ..writeByte(1)
@@ -78,7 +84,13 @@ class UserSettingsAdapter extends TypeAdapter<UserSettings> {
       ..writeByte(16)
       ..write(obj.experienceSanitizedVersion)
       ..writeByte(17)
-      ..write(obj.aiDataSharingAccepted);
+      ..write(obj.aiDataSharingAccepted)
+      ..writeByte(18)
+      ..write(obj.ageBracket)
+      ..writeByte(19)
+      ..write(obj.ageSignalCheckedAt)
+      ..writeByte(20)
+      ..write(obj.ageRestrictionNoticeShown);
   }
 
   @override

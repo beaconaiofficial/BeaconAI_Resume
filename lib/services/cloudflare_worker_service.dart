@@ -1,10 +1,13 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 import '../constants/app_constants.dart';
+import '../models/app_enums.dart';
 import '../models/supporting_models.dart';
 import '../utils/app_logger.dart';
 import 'dev_extraction_cache.dart';
+import 'hive_service.dart';
 import 'resume_sanitizer.dart';
 import 'session_extraction_cache.dart';
 
@@ -583,6 +586,32 @@ class CloudflareWorkerService {
     return '<user_content>$sanitizedText</user_content>';
   }
 
+  // ── Age assurance gate ─────────────────────────────────────────────────────
+
+  /// Whether AI calls are blocked for the stored age bracket. Overridable in
+  /// tests. Defaults to the on-device bracket; if Hive isn't open (unit tests
+  /// that never call HiveService.init) it reports not-blocked. The bracket
+  /// itself is never included in any request.
+  static bool Function() isAiBlocked = _aiBlockedFromSettings;
+
+  static bool _aiBlockedFromSettings() {
+    try {
+      return HiveService.settings.ageBracket.isAiBlocked;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Backstop for every Worker POST: throws [AiRestrictedException] (a
+  /// [CloudflareApiException], so every existing screen handler surfaces its
+  /// neutral message) before any document content leaves the device.
+  static void _ensureAiAllowed() {
+    if (isAiBlocked()) {
+      devLog('[AGE SIGNAL] AI call blocked (restricted mode)');
+      throw const AiRestrictedException();
+    }
+  }
+
   // ── Core request ───────────────────────────────────────────────────────────
 
   /// Sends a prompt to Claude via the Cloudflare Worker proxy.
@@ -598,6 +627,7 @@ class CloudflareWorkerService {
     void Function()? onCancel,
     Duration? timeout,
   }) async {
+    _ensureAiAllowed();
     final body = jsonEncode({
       'model': model,
       'max_tokens': maxTokens,
@@ -635,27 +665,27 @@ class CloudflareWorkerService {
           return first['text'] as String? ?? '';
         }
         throw const CloudflareApiException('Empty response from Claude API');
-      } else if (response.statusCode == 429) {
-        throw const CloudflareApiException(
-            'Too many requests. Please wait a moment and try again.');
       } else {
-        throw CloudflareApiException(
-            'API error ${response.statusCode}. Please try again.');
+        throw AiErrorMessages.forStatus(response.statusCode);
       }
     } on CloudflareApiException {
       rethrow;
     } catch (e) {
-      if (e.toString().contains('TimeoutException')) {
-        throw const CloudflareApiException(
-            'Request timed out. Check your connection and try again.');
-      }
-      throw CloudflareApiException('Connection failed: ${e.toString()}');
+      throw AiErrorMessages.forTransport(e,
+          timeoutMessage:
+              'Request timed out. Check your connection and try again.');
     }
   }
 
   // ── Web-search-enabled request ────────────────────────────────────────────
 
   static const Duration _webSearchTimeout = Duration(seconds: 60);
+
+  /// Pro interview prep researches the company with web search and then
+  /// writes 10-15 questions with answer guides: measured at ~45 s for a
+  /// shorter version of the same request (2026-11-25), so 60 s timed out on
+  /// real postings. Only the web-search call uses this.
+  static const Duration _interviewResearchTimeout = Duration(seconds: 150);
 
   /// Sends a prompt to Claude with the web_search tool enabled.
   /// Used for Pro-tier Interview Prep, which must research the actual
@@ -668,6 +698,7 @@ class CloudflareWorkerService {
     required String userMessage,
     int maxTokens = 4000,
   }) async {
+    _ensureAiAllowed();
     final body = jsonEncode({
       'model': _modelGenerate,
       'max_tokens': maxTokens,
@@ -690,7 +721,7 @@ class CloudflareWorkerService {
             },
             body: body,
           )
-          .timeout(_webSearchTimeout);
+          .timeout(_interviewResearchTimeout);
 
       if (response.statusCode == 200) {
         final decoded = jsonDecode(response.body) as Map<String, dynamic>;
@@ -712,21 +743,15 @@ class CloudflareWorkerService {
               'Claude returned no usable text content');
         }
         return text;
-      } else if (response.statusCode == 429) {
-        throw const CloudflareApiException(
-            'Too many requests. Please wait a moment and try again.');
       } else {
-        throw CloudflareApiException(
-            'API error ${response.statusCode}. Please try again.');
+        throw AiErrorMessages.forStatus(response.statusCode);
       }
     } on CloudflareApiException {
       rethrow;
     } catch (e) {
-      if (e.toString().contains('TimeoutException')) {
-        throw const CloudflareApiException(
-            'Request timed out. Web research can take longer than usual — please try again.');
-      }
-      throw CloudflareApiException('Connection failed: ${e.toString()}');
+      throw AiErrorMessages.forTransport(e,
+          timeoutMessage:
+              'Request timed out. Web research can take longer than usual — please try again.');
     }
   }
 
@@ -868,6 +893,7 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
   /// needed: the Worker forwards the full messages array unchanged.
   /// Uses [_webSearchTimeout] (60 s) — PDF payloads are larger than text.
   static Future<String> extractResumeFieldsFromPdf(List<int> pdfBytes) async {
+    _ensureAiAllowed();
     const systemPrompt = '''
 You are an expert document parser. Extract all resume or professional background information from the provided PDF document and return it as a structured JSON object.
 
@@ -1027,21 +1053,15 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
             } else if (response.statusCode == 413) {
               throw const CloudflareApiException(
                   'PDF file is too large for direct analysis. Try uploading fewer pages.');
-            } else if (response.statusCode == 429) {
-              throw const CloudflareApiException(
-                  'Too many requests. Please wait a moment and try again.');
             } else {
-              throw CloudflareApiException(
-                  'API error ${response.statusCode}. Please try again.');
+              throw AiErrorMessages.forStatus(response.statusCode);
             }
           } on CloudflareApiException {
             rethrow;
           } catch (e) {
-            if (e.toString().contains('TimeoutException')) {
-              throw const CloudflareApiException(
-                  'Request timed out. The document may be too complex — try uploading fewer pages at a time.');
-            }
-            throw CloudflareApiException('Connection failed: ${e.toString()}');
+            throw AiErrorMessages.forTransport(e,
+                timeoutMessage:
+                    'Request timed out. The document may be too complex — try uploading fewer pages at a time.');
           }
         },
       ),
@@ -1067,6 +1087,7 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
     List<int> imageBytes,
     String mediaType,
   ) async {
+    _ensureAiAllowed();
     const systemPrompt = '''
 You are an expert resume parser. Extract all resume information from the provided image and return it as a structured JSON object.
 
@@ -1224,21 +1245,15 @@ $_kEntryClassificationRules$_kMilitaryDocumentParsingRules''';
             } else if (response.statusCode == 413) {
               throw const CloudflareApiException(
                   'Image file is too large. Please use an image under 5 MB.');
-            } else if (response.statusCode == 429) {
-              throw const CloudflareApiException(
-                  'Too many requests. Please wait a moment and try again.');
             } else {
-              throw CloudflareApiException(
-                  'API error ${response.statusCode}. Please try again.');
+              throw AiErrorMessages.forStatus(response.statusCode);
             }
           } on CloudflareApiException {
             rethrow;
           } catch (e) {
-            if (e.toString().contains('TimeoutException')) {
-              throw const CloudflareApiException(
-                  'Request timed out. Image analysis can take longer — please try again.');
-            }
-            throw CloudflareApiException('Connection failed: ${e.toString()}');
+            throw AiErrorMessages.forTransport(e,
+                timeoutMessage:
+                    'Request timed out. Image analysis can take longer — please try again.');
           }
         },
       ),
@@ -1748,12 +1763,73 @@ class ExtractionParseResult {
 // CloudflareApiException
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Thrown instead of calling the Worker while the stored age bracket blocks AI
+/// (age-assurance restricted mode). Message is the same neutral copy as the
+/// one-time notice.
+class AiRestrictedException extends CloudflareApiException {
+  const AiRestrictedException()
+      : super(AppConstants.ageRestrictionNoticeBody);
+}
+
 class CloudflareApiException implements Exception {
   const CloudflareApiException(this.message);
   final String message;
 
   @override
   String toString() => message;
+}
+
+/// The AI server answered, but not with something the app can use: the
+/// endpoint is missing (404), rejects the app (401/403/405), or is failing
+/// (5xx). Nothing the user can fix on their side, so the message says the
+/// service is down rather than showing a raw status code.
+class AiServiceUnavailableException extends CloudflareApiException {
+  const AiServiceUnavailableException(this.statusCode)
+      : super(AiErrorMessages.serviceUnavailable);
+  final int statusCode;
+}
+
+/// The request never got an answer: no network, DNS failure, TLS failure,
+/// connection reset.
+class AiServiceUnreachableException extends CloudflareApiException {
+  const AiServiceUnreachableException() : super(AiErrorMessages.unreachable);
+}
+
+class AiErrorMessages {
+  AiErrorMessages._();
+
+  static const String serviceUnavailable =
+      "BeaconAI's AI service isn't responding right now. Nothing you've "
+      'entered was lost — please try again in a little while.';
+  static const String unreachable =
+      "Can't reach BeaconAI's AI service. Check your internet connection "
+      'and try again.';
+  static const String tooManyRequests =
+      'Too many requests. Please wait a moment and try again.';
+  static const String badRequest =
+      "The AI service couldn't process this request. Please try again.";
+
+  /// Error for a non-200 response. Call sites handle their own special cases
+  /// (e.g. 413 for oversized files) before falling back to this.
+  static CloudflareApiException forStatus(int status) {
+    if (status == 429) return const CloudflareApiException(tooManyRequests);
+    if (status == 400 || status == 422) {
+      return const CloudflareApiException(badRequest);
+    }
+    return AiServiceUnavailableException(status);
+  }
+
+  /// Error for a request that threw before a response arrived.
+  static CloudflareApiException forTransport(Object error,
+      {required String timeoutMessage}) {
+    if (error is TimeoutException) {
+      return CloudflareApiException(timeoutMessage);
+    }
+    // package:http surfaces socket, DNS and TLS failures as ClientException
+    // on mobile and in the browser alike (no dart:io needed here, which
+    // would break the web build).
+    return const AiServiceUnreachableException();
+  }
 }
 
 /// Thrown by [CloudflareWorkerService.sendPrompt] when the API's own

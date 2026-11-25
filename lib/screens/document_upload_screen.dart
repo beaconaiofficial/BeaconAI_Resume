@@ -453,6 +453,10 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
   // Multi-file extraction tracking
   List<FileExtractionResult> _processedFiles = [];
   List<String> _failedFiles = [];
+
+  /// Set when a file failed because the AI service was down or unreachable,
+  /// so the error names the real cause instead of blaming the file.
+  CloudflareApiException? _aiOutage;
   int _extractingIndex = 0; // 1-based for display
   int _totalFiles = 0;
   String _extractingFileName = '';
@@ -564,6 +568,7 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
     // Reset accumulated multi-file state.
     _processedFiles = [];
     _failedFiles = [];
+    _aiOutage = null;
     _mappings = [];
     _pendingDecisions = [];
     _unplacedFindings = [];
@@ -681,10 +686,12 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
             _state = _UploadState.picking;
           } else {
             _state = _UploadState.error;
-            _errorMessage = _failedFiles.length == 1
-                ? 'Could not extract content from the file. '
-                    'It may be corrupted or in an unsupported format.'
-                : 'Could not extract content from any of the selected files.';
+            _errorMessage = _aiOutage != null
+                ? _aiOutage!.message
+                : _failedFiles.length == 1
+                    ? 'Could not extract content from the file. '
+                        'It may be corrupted or in an unsupported format.'
+                    : 'Could not extract content from any of the selected files.';
           }
         });
       }
@@ -790,6 +797,10 @@ class _DocumentUploadScreenState extends ConsumerState<DocumentUploadScreen> {
     } on _PageLimitException {
       rethrow;
     } catch (e, st) {
+      if (e is AiServiceUnavailableException ||
+          e is AiServiceUnreachableException) {
+        _aiOutage = e as CloudflareApiException;
+      }
       devLog('[extractOneFile] error for $fileName: ${e.runtimeType}: $e');
       devLog('[extractOneFile] stacktrace: $st');
       return null;
